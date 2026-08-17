@@ -1,0 +1,15 @@
+[package]
+name = "roche-workstation"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+description = "Task-centric Rust control plane for long-running AI development agents"
+repository = "https://github.com/coseung2/roche"
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+uuid = { version = "1", features = ["serde", "v4"] }

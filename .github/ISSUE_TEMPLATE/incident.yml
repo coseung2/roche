@@ -1,0 +1,47 @@
+name: Incident
+description: 런타임/상태/데이터/보안에 영향을 주는 운영 사고를 추적합니다.
+title: "[Incident] "
+labels:
+  - incident
+body:
+  - type: markdown
+    attributes:
+      value: |
+        민감한 credential, token, private payload는 Issue에 첨부하지 마세요. 상세 기록은 `docs/incidents/TEMPLATE.md`를 사용합니다.
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - SEV-0 - critical destructive/security impact
+        - SEV-1 - high runtime/state impact
+        - SEV-2 - medium with workaround
+        - SEV-3 - low/limited impact
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: 사용자, Task/Session, Git/worktree, 데이터에 미친 영향을 사실 중심으로 적어주세요.
+    validations:
+      required: true
+  - type: textarea
+    id: current_state
+    attributes:
+      label: Current state
+      description: Detected / Contained / Diagnosing / Mitigated / Resolved 중 현재 상태와 수행한 조치를 적어주세요.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: 민감 정보를 제거한 log/event/test/commit 근거를 적어주세요.
+  - type: checkboxes
+    id: containment
+    attributes:
+      label: Containment
+      options:
+        - label: 추가 손상 가능성이 있으면 관련 자동화 또는 destructive action을 차단했습니다.
+        - label: 필요한 log/event/worktree evidence를 보존했습니다.

@@ -1,0 +1,58 @@
+name: Bug report
+description: 재현 가능한 기능 오류 또는 회귀를 기록합니다.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: 무엇이 잘못 동작하는지 간결하게 적어주세요.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: 기대한 상태 또는 동작을 적어주세요.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: 가능한 최소 재현 절차를 적어주세요.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: 관련 log, Task 상태, test 결과를 민감 정보를 제거한 뒤 적어주세요.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - UI / Performance
+        - Herdr / Runtime
+        - Orchestrator / Task State
+        - Persistence / Event Store
+        - Git / Worktree
+        - Verification / Tests
+        - ChatGPT / DevSpace
+        - Context Engine
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: incident
+    attributes:
+      label: Incident check
+      options:
+        - label: 데이터/저장소 손상, agent lifetime 손상, 잘못된 완료 처리, security 영향이 있다면 Incident 절차도 시작했습니다.
