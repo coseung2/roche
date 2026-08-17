@@ -18,6 +18,10 @@
 - ADR management system
 - Incident management system
 - GitHub Issue / Pull Request templates
+- Phase 0 synthetic performance workload for 100,000 messages, 100,000 tool events, and 1,000 sessions
+- Framework-independent viewport virtualization core and streaming-tail invariant tests
+- 50 MiB terminal ingest simulation with a bounded 500-line resident ring buffer
+- Release-mode `perf_poc` runner and performance baseline documentation
 
 ### Changed
 
