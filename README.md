@@ -4,7 +4,7 @@ Rust 기반의 장기 실행 AI 개발 워크스테이션입니다. 대화 자�
 
 ## 현재 상태
 
-프로젝트는 **Phase 0 — Performance PoC** 단계입니다. Framework-independent 성능 코어를 먼저 고정했고, 다음으로 UI framework 후보를 동일 workload에서 비교합니다.
+프로젝트는 **Phase 0B — Usable Desktop Shell** 단계입니다. Framework-independent 성능 코어 위에 egui/eframe 기반 Windows native shell을 올렸고, 다음으로 Herdr 실연동을 진행합니다.
 
 현재 구현된 코어:
 
@@ -19,11 +19,16 @@ Rust 기반의 장기 실행 AI 개발 워크스테이션입니다. 대화 자�
 - viewport + overscan 기반 virtual window
 - 50 MiB terminal history를 최근 500줄로 제한하는 ring buffer
 - release-mode Performance PoC runner와 baseline 기록
+- egui/eframe Windows native desktop shell
+- 1,000-session virtualized sidebar + status/search filter
+- 100,000-row virtualized Chat / Tools views
+- 최근 500줄 terminal view
+- 로컬 Task 생성 UI
 
 아직 구현하지 않은 주요 영역:
 
-- Native UI framework 후보별 prototype / 실제 frame-time 비교
 - 실제 Herdr Socket API client
+- Windows IME / text selection / Markdown rich rendering 검증
 - SQLite event store
 - worktree / git diff / verifier
 - ChatGPT / DevSpace bridge
@@ -99,11 +104,19 @@ cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-현재 main binary는 foundation placeholder입니다.
+실사용 desktop shell은 다음 명령으로 실행합니다.
 
 ```bash
-cargo run
+cargo run --release --bin roche-workstation
 ```
+
+이미 release build를 했다면 Windows에서 다음 파일을 직접 실행할 수 있습니다.
+
+```text
+target\\release\\roche-workstation.exe
+```
+
+현재 shell은 `LOCAL PERF MODE`로 시작하며 synthetic session/event 데이터를 사용합니다. Task 생성과 virtualized browsing은 실제 UI로 동작하고, Codex/Herdr launch는 다음 integration 단계에서 연결됩니다.
 
 Phase 0 성능 workload는 release mode에서 실행합니다.
 

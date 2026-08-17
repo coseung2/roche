@@ -22,6 +22,9 @@
 - Framework-independent viewport virtualization core and streaming-tail invariant tests
 - 50 MiB terminal ingest simulation with a bounded 500-line resident ring buffer
 - Release-mode `perf_poc` runner and performance baseline documentation
+- egui/eframe native desktop shell with virtualized session, conversation, tool, and terminal views
+- Session search/status filters and local Task creation flow
+- ADR-0002 documenting the Phase 0B desktop framework decision
 
 ### Changed
 

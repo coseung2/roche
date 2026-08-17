@@ -4,3 +4,4 @@ pub mod models;
 pub mod orchestrator;
 pub mod perf;
 pub mod sidebar;
+pub mod ui;
