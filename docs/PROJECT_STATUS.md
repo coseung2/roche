@@ -6,9 +6,9 @@
 
 ## 현재 단계
 
-**Phase 0 — Performance PoC**
+**Phase 0B — Usable Desktop Shell**
 
-Framework-independent 성능 workload와 virtualization invariant를 먼저 고정한 상태입니다. 다음 단계는 동일 workload를 UI framework 후보별 prototype에 연결해 실제 frame time, memory, text/IME 동작을 비교하는 Phase 0B입니다.
+Framework-independent 성능 workload 위에 egui/eframe 기반 Windows native shell을 연결했습니다. 이제 실제 UI를 실행해 100k-scale views를 조작할 수 있으며, 다음 P0는 Herdr daemon/socket 연동입니다.
 
 ## 구현 완료
 
@@ -30,6 +30,13 @@ Framework-independent 성능 workload와 virtualization invariant를 먼저 고�
 - [x] 100,000 streaming tail append bounded-materialization test
 - [x] 50 MiB terminal ingest / 500-line resident ring buffer test
 - [x] release-mode Performance PoC runner / baseline 문서
+- [x] egui/eframe desktop shell (ADR-0002)
+- [x] 1,000-session virtualized sidebar / search / status filter
+- [x] 100,000-message virtualized Chat view
+- [x] 100,000-event virtualized Tools view
+- [x] 500-line resident Terminal view
+- [x] local Task creation UI
+- [x] Windows release `.exe` build
 
 ## 다음 작업
 
@@ -41,16 +48,17 @@ Framework-independent 성능 workload와 virtualization invariant를 먼저 고�
 - [x] 1,000 sessions virtual-window core
 - [x] 50 MiB terminal ring buffer
 - [x] streaming tail bounded-materialization 부하 테스트
-- [ ] UI framework 후보별 최소 prototype
+- [x] egui/eframe 최소 prototype
 - [ ] 실제 scroll / frame-time 측정
 - [ ] jump-to-bottom / task switching 측정
 - [ ] Markdown parse / layout cache 전략 측정
 - [ ] Windows IME / text selection 검증
-- [ ] 결과를 ADR로 기록하고 UI framework 선택
+- [x] Phase 0B framework 선택을 ADR-0002로 기록
+- [ ] IME/selection/Markdown 검증 후 장기 framework 결정 확정
 
 ### P0 — Herdr Integration
 
-Performance PoC와 경계 정의가 끝나면 진행합니다.
+Desktop shell 기준선이 생겼으므로 바로 진행합니다.
 
 - [ ] Herdr daemon 발견 / health check
 - [ ] Socket transport
@@ -83,11 +91,10 @@ Performance PoC와 경계 정의가 끝나면 진행합니다.
 
 ## 현재 알려진 제약
 
-- UI framework 미선정
-- Phase 0A는 render/layout 자체가 아니라 materialization core만 검증함
+- egui/eframe은 Phase 0B 선택이며 장기 확정 전 IME/selection/Markdown 검증이 남아 있음
 - 실제 Herdr protocol과 아직 연결되지 않음
 - persistence 없음
-- main binary는 placeholder
+- 현재 desktop shell은 synthetic `LOCAL PERF MODE`
 
 ## 품질 게이트
 
