@@ -4,7 +4,7 @@ Rust 기반의 장기 실행 AI 개발 워크스테이션입니다. 대화 자�
 
 ## 현재 상태
 
-프로젝트는 초기 foundation 단계입니다.
+프로젝트는 **Phase 0 — Performance PoC** 단계입니다. Framework-independent 성능 코어를 먼저 고정했고, 다음으로 UI framework 후보를 동일 workload에서 비교합니다.
 
 현재 구현된 코어:
 
@@ -15,10 +15,14 @@ Rust 기반의 장기 실행 AI 개발 워크스테이션입니다. 대화 자�
 - Blocked / attention 우선 Sidebar projection
 - Herdr snapshot을 로컬 runtime cache에 반영하는 App state
 - 핵심 상태 전이 및 정렬 테스트
+- 100,000 messages / 100,000 tool events / 1,000 sessions synthetic workload
+- viewport + overscan 기반 virtual window
+- 50 MiB terminal history를 최근 500줄로 제한하는 ring buffer
+- release-mode Performance PoC runner와 baseline 기록
 
 아직 구현하지 않은 주요 영역:
 
-- Native UI / virtualization 성능 PoC
+- Native UI framework 후보별 prototype / 실제 frame-time 비교
 - 실제 Herdr Socket API client
 - SQLite event store
 - worktree / git diff / verifier
@@ -95,11 +99,19 @@ cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-현재 binary는 foundation placeholder입니다.
+현재 main binary는 foundation placeholder입니다.
 
 ```bash
 cargo run
 ```
+
+Phase 0 성능 workload는 release mode에서 실행합니다.
+
+```bash
+cargo run --release --bin perf_poc
+```
+
+성능 측정 정책과 baseline은 [`docs/performance/README.md`](docs/performance/README.md)에서 관리합니다.
 
 ## 저장소 운영
 
@@ -107,6 +119,7 @@ cargo run
 - 프로젝트 상태: [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md)
 - Architecture Decision Records: [`docs/adr/README.md`](docs/adr/README.md)
 - Incident 관리: [`docs/incidents/README.md`](docs/incidents/README.md)
+- Performance PoC: [`docs/performance/README.md`](docs/performance/README.md)
 - 보안 원칙: [`SECURITY.md`](SECURITY.md)
 - 변경 이력: [`CHANGELOG.md`](CHANGELOG.md)
 
