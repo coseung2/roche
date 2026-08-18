@@ -183,6 +183,73 @@ impl SessionGraph {
         self.sessions.get(session_id)
     }
 
+    pub fn rename(
+        &mut self,
+        session_id: &str,
+        title: impl Into<String>,
+    ) -> Result<AgentSession, String> {
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| format!("Unknown session: {session_id}"))?;
+        session.title = normalized_title(title.into(), session.runtime);
+        session.updated_at_ms = now_ms();
+        let snapshot = session.clone();
+        self.push_event(
+            session_id,
+            "session.renamed",
+            format!("Session renamed to {}", snapshot.title),
+        );
+        Ok(snapshot)
+    }
+
+    pub fn subtree_ids(&self, session_id: &str) -> Result<Vec<String>, String> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| format!("Unknown session: {session_id}"))?;
+        let mut ids = vec![session.id.clone()];
+        let mut index = 0;
+        while index < ids.len() {
+            let current = ids[index].clone();
+            if let Some(session) = self.sessions.get(&current) {
+                ids.extend(session.worker_ids.iter().cloned());
+            }
+            index += 1;
+        }
+        Ok(ids)
+    }
+
+    pub fn remove_subtree(&mut self, session_id: &str) -> Result<Vec<AgentSession>, String> {
+        let ids = self.subtree_ids(session_id)?;
+        let parent_id = self
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.parent_session_id.clone());
+        if let Some(parent_id) = parent_id
+            && let Some(parent) = self.sessions.get_mut(&parent_id)
+        {
+            parent.worker_ids.retain(|id| id != session_id);
+            parent.updated_at_ms = now_ms();
+        }
+
+        let mut removed = Vec::new();
+        for id in ids.iter().rev() {
+            if let Some(session) = self.sessions.remove(id) {
+                removed.push(session);
+            }
+        }
+        let removed_ids = ids.iter().collect::<std::collections::HashSet<_>>();
+        self.order.retain(|id| !removed_ids.contains(id));
+        self.push_event(
+            session_id,
+            "session.deleted",
+            format!("Deleted {} session(s)", removed.len()),
+        );
+        removed.reverse();
+        Ok(removed)
+    }
+
     pub fn set_status(
         &mut self,
         session_id: &str,
@@ -330,5 +397,28 @@ mod tests {
             .spawn_worker(&root.id, SessionRuntime::WebGpt, "Too late")
             .unwrap_err();
         assert!(error.contains("inactive"));
+    }
+
+    #[test]
+    fn rename_and_remove_subtree_preserve_parent_graph() {
+        let mut graph = SessionGraph::new();
+        let root = graph.create_root("project-a", SessionRuntime::Unified, "Main");
+        let worker = graph
+            .spawn_worker(&root.id, SessionRuntime::Codex, "Implementation")
+            .unwrap();
+        let child = graph
+            .spawn_worker(&worker.id, SessionRuntime::WebGpt, "Review")
+            .unwrap();
+
+        let renamed = graph.rename(&worker.id, "Backend").unwrap();
+        assert_eq!(renamed.title, "Backend");
+
+        let removed = graph.remove_subtree(&worker.id).unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(removed.iter().any(|session| session.id == worker.id));
+        assert!(removed.iter().any(|session| session.id == child.id));
+        assert!(graph.get(&worker.id).is_none());
+        assert!(graph.get(&child.id).is_none());
+        assert!(graph.workers_of(&root.id).unwrap().is_empty());
     }
 }

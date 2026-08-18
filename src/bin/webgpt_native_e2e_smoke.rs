@@ -6,6 +6,7 @@ use std::{
 use roche_workstation::web_browser::{
     WebGptBrowserController, WebGptBrowserEvent, WebGptBrowserState,
 };
+use roche_workstation::web_browser_protocol::WebGptTurnRequest;
 
 const EXPECTED: &str = "ROCHE_NATIVE_WEBGPT_READY";
 
@@ -48,8 +49,13 @@ fn main() {
             .unwrap_or_default()
             .as_nanos()
     );
+    // Build an explicit unleased request and lease the single slot (generation 1)
+    // so the smoke run correlates the answer against the full ownership.
+    let request =
+        WebGptTurnRequest::native_chat("web-smoke-session".to_owned(), request_id.clone());
+    let correlation = request.lease(0, 1);
     browser.submit_chat(
-        request_id.clone(),
+        correlation.clone(),
         format!("Reply with exactly {EXPECTED} and nothing else."),
     );
 
@@ -59,9 +65,9 @@ fn main() {
             println!("BROWSER {event:?}");
             match event {
                 WebGptBrowserEvent::ChatAnswered {
-                    request_id: answered_request_id,
+                    correlation: answered_correlation,
                     text,
-                } if answered_request_id == request_id => {
+                } if answered_correlation == correlation => {
                     if text.trim() == EXPECTED {
                         println!("WEBGPT_NATIVE_E2E_READY {EXPECTED}");
                         return;

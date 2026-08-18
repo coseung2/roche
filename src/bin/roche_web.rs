@@ -89,12 +89,20 @@ fn run() -> Result<Value, String> {
             let runtime = flag_value(&args, "--runtime")?;
             let parent_session_id = optional_flag_value(&args, "--parent");
             let title = optional_flag_value(&args, "--title");
+            let goal = optional_flag_value(&args, "--goal");
+            let effort = optional_flag_value(&args, "--effort");
+            let model = optional_flag_value(&args, "--model");
+            let acceptance = repeated_flag_values(&args, "--accept");
             rpc_call(
                 "session.spawn",
                 json!({
                     "runtime": runtime,
                     "parent_session_id": parent_session_id,
                     "title": title,
+                    "goal": goal,
+                    "effort": effort,
+                    "model": model,
+                    "acceptance": acceptance,
                 }),
             )
         }
@@ -231,7 +239,7 @@ fn help() -> String {
         "  roche_web chat-cancel <request-id>",
         "  roche_web session-list",
         "  roche_web session-get <session-id>",
-        "  roche_web session-spawn --runtime web_gpt|codex [--parent <session-id>] [--title <title>]",
+        "  roche_web session-spawn --runtime web_gpt|codex [--parent <session-id>] [--title <title>] [--goal <goal>] [--accept <criterion>]... [--effort low|high|xhigh] [--model <slug>]",
         "  roche_web session-status <session-id> --status idle|running|waiting_on_workers|needs_input|completed|failed|cancelled|offline",
         "  roche_web session-workers <session-id>",
         "  roche_web session-events [--after <seq>]",

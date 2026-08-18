@@ -5,6 +5,15 @@ mod codex;
 #[path = "../sessions.rs"]
 mod sessions;
 #[allow(dead_code)]
+#[path = "../web_browser.rs"]
+mod web_browser;
+#[allow(dead_code)]
+#[path = "../web_browser_pool.rs"]
+mod web_browser_pool;
+#[allow(dead_code)]
+#[path = "../web_browser_protocol.rs"]
+mod web_browser_protocol;
+#[allow(dead_code)]
 #[path = "../webgpt.rs"]
 mod webgpt;
 
@@ -17,7 +26,10 @@ fn main() {
     let project_root = std::env::var_os("ROCHE_PROJECT_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    let runtime = CodexRuntimeController::spawn(project_root);
+    let runtime = CodexRuntimeController::spawn_with_web_browser(
+        project_root,
+        web_browser::SharedWebGptBrowser::disabled("Web GPT disabled for bridge smoke"),
+    );
     let mut ready = false;
     for _ in 0..200 {
         for event in runtime.drain() {

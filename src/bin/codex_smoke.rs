@@ -4,10 +4,14 @@ use std::{
 };
 
 use roche_workstation::codex::{CodexConnection, CodexEvent, CodexRuntimeController};
+use roche_workstation::web_browser::SharedWebGptBrowser;
 
 fn main() {
     let root = std::env::current_dir().expect("current directory");
-    let runtime = CodexRuntimeController::spawn(root);
+    let runtime = CodexRuntimeController::spawn_with_web_browser(
+        root,
+        SharedWebGptBrowser::disabled("Web GPT disabled for Codex smoke"),
+    );
     let model = std::env::var("ROCHE_CODEX_SMOKE_MODEL")
         .ok()
         .map(|value| value.trim().to_owned())

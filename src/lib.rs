@@ -1,7 +1,10 @@
 pub mod codex;
+pub mod mcp;
 pub mod ocx;
 pub mod perf;
 pub mod sessions;
 pub mod ui;
 pub mod web_browser;
+pub mod web_browser_pool;
+pub mod web_browser_protocol;
 pub mod webgpt;

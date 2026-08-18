@@ -302,10 +302,10 @@ pub fn ocx_health_pid() -> Option<u32> {
         .map(|health| health.pid)
 }
 
-/// Launch the OCX CLI (`ocx start` / `ocx stop`) as a detached background command.
+/// Launch an OCX lifecycle command as a detached background command.
 pub fn run_ocx(action: &str) -> Result<(), String> {
     let action = match action {
-        "start" | "stop" => action,
+        "ensure" | "start" | "stop" | "restart" => action,
         _ => return Err("Invalid OCX action".into()),
     };
     let command = format!("ocx {action}");
@@ -376,6 +376,51 @@ pub struct ProviderConfig {
     pub auth_mode: Option<String>,
     #[serde(default)]
     pub disabled: bool,
+}
+
+/// A model row exposed by OCX's management Models page.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcxModel {
+    pub provider: String,
+    pub id: String,
+    pub namespaced: String,
+    #[serde(default)]
+    pub disabled: bool,
+    #[serde(default)]
+    pub native: bool,
+    pub display_name: Option<String>,
+    pub context_window: Option<u64>,
+}
+
+/// The live recommendation list and complete pickable list from OCX.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OcxSubagentModels {
+    #[serde(default)]
+    pub chosen: Vec<String>,
+    #[serde(default)]
+    pub available: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcxInjectionSettings {
+    #[serde(default)]
+    pub multi_agent_guidance_enabled: bool,
+    #[serde(default)]
+    pub sync_codex_subagent_defaults: bool,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub efforts: Vec<String>,
+    #[serde(default)]
+    pub available: Vec<OcxInjectionModel>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OcxInjectionModel {
+    pub namespaced: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -477,6 +522,18 @@ pub fn fetch_codex_accounts() -> Result<Vec<CodexAccount>, String> {
 
 pub fn fetch_provider_configs() -> Result<Vec<ProviderConfig>, String> {
     ocx_get_json("/api/providers")
+}
+
+pub fn fetch_ocx_models() -> Result<Vec<OcxModel>, String> {
+    ocx_get_json("/api/models")
+}
+
+pub fn fetch_subagent_models() -> Result<OcxSubagentModels, String> {
+    ocx_get_json("/api/subagent-models")
+}
+
+pub fn fetch_injection_settings() -> Result<OcxInjectionSettings, String> {
+    ocx_get_json("/api/injection-model")
 }
 
 pub fn fetch_codex_active_state() -> Result<CodexActiveState, String> {
@@ -689,6 +746,34 @@ pub fn set_auto_switch_threshold(threshold: u32) -> Result<(), String> {
     let threshold = threshold.min(100);
     let body = serde_json::json!({ "threshold": threshold }).to_string();
     ocx_request("PUT", "/api/codex-auth/auto-switch", Some(&body))
+}
+
+pub fn set_model_visibility(model: &OcxModel, enabled: bool) -> Result<(), String> {
+    let body = serde_json::json!({
+        "scope": "models",
+        "provider": model.provider,
+        "enabled": enabled,
+        "targets": [{ "id": model.id, "native": model.native }],
+    })
+    .to_string();
+    ocx_request("PUT", "/api/model-visibility", Some(&body))
+}
+
+pub fn set_subagent_models(models: &[String]) -> Result<(), String> {
+    let body = serde_json::json!({ "models": models }).to_string();
+    ocx_request("PUT", "/api/subagent-models", Some(&body))
+}
+
+pub fn set_injection_settings(settings: &OcxInjectionSettings) -> Result<(), String> {
+    let body = serde_json::json!({
+        "multiAgentGuidanceEnabled": settings.multi_agent_guidance_enabled,
+        "syncCodexSubagentDefaults": settings.sync_codex_subagent_defaults,
+        "model": settings.model,
+        "effort": settings.effort,
+        "prompt": settings.prompt,
+    })
+    .to_string();
+    ocx_request("PUT", "/api/injection-model", Some(&body))
 }
 
 pub fn consume_reset_credit(account_id: &str) -> Result<(), String> {
