@@ -1,5 +1,5 @@
 #[allow(dead_code)]
-#[path = "../codex.rs"]
+#[path = "../codex/mod.rs"]
 mod codex;
 #[allow(dead_code)]
 #[path = "../sessions.rs"]
