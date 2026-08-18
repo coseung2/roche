@@ -5,7 +5,7 @@ mod codex;
 #[path = "../sessions.rs"]
 mod sessions;
 #[allow(dead_code)]
-#[path = "../web_browser.rs"]
+#[path = "../web_browser/mod.rs"]
 mod web_browser;
 #[allow(dead_code)]
 #[path = "../web_browser_pool.rs"]
