@@ -1,7 +1,7 @@
-pub mod app;
-pub mod herdr;
-pub mod models;
-pub mod orchestrator;
+pub mod codex;
+pub mod ocx;
 pub mod perf;
-pub mod sidebar;
+pub mod sessions;
 pub mod ui;
+pub mod web_browser;
+pub mod webgpt;

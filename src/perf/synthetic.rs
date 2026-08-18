@@ -1,9 +1,16 @@
-use crate::models::AgentRuntimeStatus;
-
 pub const STANDARD_MESSAGE_COUNT: usize = 100_000;
 pub const STANDARD_TOOL_EVENT_COUNT: usize = 100_000;
 pub const STANDARD_SESSION_COUNT: usize = 1_000;
 pub const STANDARD_TERMINAL_BYTES: u64 = 50 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyntheticAgentStatus {
+    Working,
+    Blocked,
+    Idle,
+    Done,
+    Unknown,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyntheticActor {
@@ -38,7 +45,7 @@ pub struct SyntheticToolEvent {
 pub struct SyntheticSession {
     pub id: u64,
     pub task_name: String,
-    pub runtime_status: AgentRuntimeStatus,
+    pub runtime_status: SyntheticAgentStatus,
     pub changed_files: usize,
     pub attention_required: bool,
     pub recent_activity: String,
@@ -102,11 +109,11 @@ pub fn generate_sessions(count: usize) -> Vec<SyntheticSession> {
     (0..count)
         .map(|index| {
             let runtime_status = match index % 10 {
-                0 => AgentRuntimeStatus::Blocked,
-                1..=5 => AgentRuntimeStatus::Working,
-                6..=7 => AgentRuntimeStatus::Idle,
-                8 => AgentRuntimeStatus::Done,
-                _ => AgentRuntimeStatus::Unknown,
+                0 => SyntheticAgentStatus::Blocked,
+                1..=5 => SyntheticAgentStatus::Working,
+                6..=7 => SyntheticAgentStatus::Idle,
+                8 => SyntheticAgentStatus::Done,
+                _ => SyntheticAgentStatus::Unknown,
             };
 
             SyntheticSession {
@@ -114,7 +121,7 @@ pub fn generate_sessions(count: usize) -> Vec<SyntheticSession> {
                 task_name: format!("task-{index:04}"),
                 runtime_status,
                 changed_files: index % 12,
-                attention_required: matches!(runtime_status, AgentRuntimeStatus::Blocked),
+                attention_required: matches!(runtime_status, SyntheticAgentStatus::Blocked),
                 recent_activity: format!("Processing src/module_{:03}.rs", index % 256),
             }
         })
