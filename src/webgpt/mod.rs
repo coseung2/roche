@@ -1,123 +1,47 @@
+//! Roche-owned Web GPT orchestration core and public façade.
+
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
-    fs,
-    io::{BufRead, BufReader, Write},
-    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
-    path::{Path, PathBuf},
-    process::Command,
-    sync::{
-        Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
-        mpsc::{Receiver, Sender},
-    },
-    thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    collections::{HashMap, VecDeque},
+    path::PathBuf,
+    sync::mpsc::Sender,
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod chat;
+mod runtime;
+mod task_store;
+mod transport;
+mod types;
+
+#[allow(unused_imports)]
+pub use runtime::{WebGptRuntimeController, WebGptRuntimeEvent};
+pub(crate) use transport::spawn_orchestrator_bridge;
+#[allow(unused_imports)]
+pub use transport::{DEFAULT_WEBGPT_BRIDGE_ADDR, bridge_addr, rpc_call};
+#[allow(unused_imports)]
+pub use types::{
+    OrchestratorEvent, OrchestratorTask, OrchestratorTaskStatus, ProjectSnapshot, WebChatRequest,
+    WebChatStatus,
+};
+
+use chat::{ChatMailbox, ChatOutcome};
+use task_store::TaskStore;
+use transport::capability_matches;
+use types::{
+    next_task_id, normalize_effort, now_ms, orchestrator_prompt, parse_session_runtime,
+    parse_session_status, project_snapshot, required_string,
+};
+
 use crate::{
     codex::{CodexCommand, CodexConnection, CodexEvent, CodexWorkerRuntime},
     sessions::{SessionGraph, SessionRuntime, SessionStatus},
-    web_browser::{SharedWebGptBrowser, WebGptBrowserEvent, WebGptBrowserState},
+    web_browser::{WebGptBrowserEvent, WebGptBrowserState},
     web_browser_protocol::{
         DEFAULT_LOCAL_WEB_GPT_ACCOUNT_ID, WebGptTurnCorrelation, WebGptTurnRequest,
     },
 };
-
-pub const DEFAULT_WEBGPT_BRIDGE_ADDR: &str = "127.0.0.1:47831";
-const BRIDGE_DESCRIPTOR_RELATIVE_PATH: &str = ".ai-bridge/roche-webgpt-runtime.json";
-const MAX_TASK_EVENTS: usize = 2_000;
-const UI_POLL_INTERVAL: Duration = Duration::from_millis(150);
-
-static TASK_COUNTER: AtomicU64 = AtomicU64::new(1);
-static IN_PROCESS_BRIDGE: OnceLock<BridgeClientConfig> = OnceLock::new();
-static BRIDGE_REBIND: OnceLock<Sender<BridgeRebind>> = OnceLock::new();
-static BRIDGE_CURRENT_ROOT: OnceLock<Mutex<PathBuf>> = OnceLock::new();
-
-struct BridgeRebind {
-    project_root: PathBuf,
-    commands: Sender<CodexCommand>,
-    codex_events: Receiver<CodexEvent>,
-    web_browser: SharedWebGptBrowser,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct BridgeClientConfig {
-    address: String,
-    token: String,
-    pid: u32,
-    project_root: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OrchestratorTaskStatus {
-    Queued,
-    Preparing,
-    RunningCodex,
-    RunningWebGpt,
-    NeedsReview,
-    Failed,
-    Cancelled,
-    Completed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrchestratorTask {
-    pub id: String,
-    pub session_id: Option<String>,
-    pub title: String,
-    pub goal: String,
-    pub acceptance: Vec<String>,
-    pub effort: String,
-    pub status: OrchestratorTaskStatus,
-    pub turn_id: Option<String>,
-    pub result: Option<String>,
-    pub tool_activity: Vec<String>,
-    pub revision_count: u32,
-    pub cancel_requested: bool,
-    pub created_at_ms: u128,
-    pub updated_at_ms: u128,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrchestratorEvent {
-    pub seq: u64,
-    pub task_id: Option<String>,
-    pub event: String,
-    pub summary: String,
-    pub timestamp_ms: u128,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectSnapshot {
-    pub root: String,
-    pub status_short: String,
-    pub diff_stat: String,
-    pub changed_files: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebChatStatus {
-    Pending,
-    Claimed,
-    Answered,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebChatRequest {
-    pub id: String,
-    pub text: String,
-    pub reasoning_level: String,
-    pub status: WebChatStatus,
-    pub response: Option<String>,
-    pub created_at_ms: u128,
-    pub updated_at_ms: u128,
-}
 
 #[derive(Debug, Deserialize)]
 struct RpcRequest {
@@ -167,11 +91,8 @@ struct BridgeState {
     codex_busy: bool,
     active_task_id: Option<String>,
     queue: VecDeque<String>,
-    tasks: BTreeMap<String, OrchestratorTask>,
-    events: VecDeque<OrchestratorEvent>,
-    next_event_seq: u64,
-    chat_requests: BTreeMap<String, WebChatRequest>,
-    pending_chat: VecDeque<String>,
+    task_store: TaskStore,
+    chat: ChatMailbox,
     sessions: SessionGraph,
     root_session_id: String,
     worker_runtimes: HashMap<String, CodexWorkerRuntime>,
@@ -194,11 +115,8 @@ impl BridgeState {
             codex_busy: false,
             active_task_id: None,
             queue: VecDeque::new(),
-            tasks: BTreeMap::new(),
-            events: VecDeque::new(),
-            next_event_seq: 1,
-            chat_requests: BTreeMap::new(),
-            pending_chat: VecDeque::new(),
+            task_store: TaskStore::default(),
+            chat: ChatMailbox::default(),
             sessions,
             root_session_id: root.id,
             worker_runtimes: HashMap::new(),
@@ -216,18 +134,7 @@ impl BridgeState {
         event: impl Into<String>,
         summary: impl Into<String>,
     ) {
-        let entry = OrchestratorEvent {
-            seq: self.next_event_seq,
-            task_id,
-            event: event.into(),
-            summary: summary.into(),
-            timestamp_ms: now_ms(),
-        };
-        self.next_event_seq = self.next_event_seq.saturating_add(1);
-        self.events.push_back(entry);
-        while self.events.len() > MAX_TASK_EVENTS {
-            self.events.pop_front();
-        }
+        self.task_store.push_event(task_id, event, summary);
     }
 
     fn queue_web_worker(&mut self, task_id: String) {
@@ -242,7 +149,7 @@ impl BridgeState {
             return;
         }
         while let Some(task_id) = self.web_worker_queue.pop_front() {
-            let Some(task) = self.tasks.get_mut(&task_id) else {
+            let Some(task) = self.task_store.tasks.get_mut(&task_id) else {
                 continue;
             };
             if task.status != OrchestratorTaskStatus::Preparing {
@@ -354,11 +261,11 @@ impl BridgeState {
             created_at_ms: timestamp,
             updated_at_ms: timestamp,
         };
-        self.tasks.insert(id.clone(), task);
+        self.task_store.tasks.insert(id.clone(), task);
         self.queue.push_back(id.clone());
         self.push_event(Some(id.clone()), "task.queued", "Task queued by Web GPT");
         Ok(
-            serde_json::to_value(self.tasks.get(&id).expect("inserted task"))
+            serde_json::to_value(self.task_store.tasks.get(&id).expect("inserted task"))
                 .expect("task serialization cannot fail"),
         )
     }
@@ -373,6 +280,7 @@ impl BridgeState {
             .transpose()?;
         let (session_id, worker_prompt, worker_effort) = {
             let task = self
+                .task_store
                 .tasks
                 .get_mut(&task_id)
                 .ok_or_else(|| format!("Unknown task: {task_id}"))?;
@@ -455,7 +363,7 @@ impl BridgeState {
             );
         }
         Ok(
-            serde_json::to_value(self.tasks.get(&task_id).expect("existing task"))
+            serde_json::to_value(self.task_store.tasks.get(&task_id).expect("existing task"))
                 .expect("task serialization cannot fail"),
         )
     }
@@ -467,6 +375,7 @@ impl BridgeState {
     ) -> Result<Value, String> {
         let task_id = required_string(params, "task_id")?;
         let worker_session_id = self
+            .task_store
             .tasks
             .get(&task_id)
             .ok_or_else(|| format!("Unknown task: {task_id}"))?
@@ -480,7 +389,11 @@ impl BridgeState {
                 .ok_or_else(|| format!("Unknown worker session: {session_id}"))?;
             if runtime_kind == SessionRuntime::WebGpt {
                 let active = self.active_web_task_id.as_deref() == Some(task_id.as_str());
-                let task = self.tasks.get_mut(&task_id).expect("existing task");
+                let task = self
+                    .task_store
+                    .tasks
+                    .get_mut(&task_id)
+                    .expect("existing task");
                 if task.cancel_requested {
                     return Ok(
                         serde_json::to_value(&*task).expect("task serialization cannot fail")
@@ -550,12 +463,16 @@ impl BridgeState {
                     },
                 );
                 self.dispatch_next_web_worker();
-                return Ok(
-                    serde_json::to_value(self.tasks.get(&task_id).expect("existing task"))
-                        .expect("task serialization cannot fail"),
-                );
+                return Ok(serde_json::to_value(
+                    self.task_store.tasks.get(&task_id).expect("existing task"),
+                )
+                .expect("task serialization cannot fail"));
             }
-            let task = self.tasks.get_mut(&task_id).expect("existing task");
+            let task = self
+                .task_store
+                .tasks
+                .get_mut(&task_id)
+                .expect("existing task");
             match task.status {
                 OrchestratorTaskStatus::Preparing | OrchestratorTaskStatus::RunningCodex => {
                     task.cancel_requested = true;
@@ -585,14 +502,18 @@ impl BridgeState {
                 "task.cancel_requested",
                 "Cancellation sent to independent Codex worker",
             );
-            return Ok(
-                serde_json::to_value(self.tasks.get(&task_id).expect("existing task"))
-                    .expect("task serialization cannot fail"),
-            );
+            return Ok(serde_json::to_value(
+                self.task_store.tasks.get(&task_id).expect("existing task"),
+            )
+            .expect("task serialization cannot fail"));
         }
 
         let active = self.active_task_id.as_deref() == Some(task_id.as_str());
-        let task = self.tasks.get_mut(&task_id).expect("existing task");
+        let task = self
+            .task_store
+            .tasks
+            .get_mut(&task_id)
+            .expect("existing task");
         match task.status {
             OrchestratorTaskStatus::Queued | OrchestratorTaskStatus::Preparing => {
                 self.queue.retain(|queued| queued != &task_id);
@@ -626,7 +547,7 @@ impl BridgeState {
             },
         );
         Ok(
-            serde_json::to_value(self.tasks.get(&task_id).expect("existing task"))
+            serde_json::to_value(self.task_store.tasks.get(&task_id).expect("existing task"))
                 .expect("task serialization cannot fail"),
         )
     }
@@ -635,6 +556,7 @@ impl BridgeState {
         let task_id = required_string(params, "task_id")?;
         let session_id = {
             let task = self
+                .task_store
                 .tasks
                 .get_mut(&task_id)
                 .ok_or_else(|| format!("Unknown task: {task_id}"))?;
@@ -666,162 +588,49 @@ impl BridgeState {
             "Task approved after review",
         );
         Ok(
-            serde_json::to_value(self.tasks.get(&task_id).expect("existing task"))
+            serde_json::to_value(self.task_store.tasks.get(&task_id).expect("existing task"))
                 .expect("task serialization cannot fail"),
         )
     }
 
+    fn record_chat_outcome(
+        &mut self,
+        outcome: Result<ChatOutcome, String>,
+    ) -> Result<Value, String> {
+        let outcome = outcome?;
+        if let Some(event) = outcome.event {
+            self.push_event(None, event.event, event.summary);
+        }
+        Ok(outcome.value)
+    }
+
     fn submit_chat(&mut self, params: &Value) -> Result<Value, String> {
-        let text = required_string(params, "text")?;
-        let reasoning_level = params
-            .get("reasoning_level")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("very_high")
-            .to_owned();
-        let id = format!(
-            "chat-{}-{}",
-            now_ms(),
-            TASK_COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
-        let timestamp = now_ms();
-        let request = WebChatRequest {
-            id: id.clone(),
-            text,
-            reasoning_level,
-            status: WebChatStatus::Pending,
-            response: None,
-            created_at_ms: timestamp,
-            updated_at_ms: timestamp,
-        };
-        self.chat_requests.insert(id.clone(), request);
-        self.pending_chat.push_back(id.clone());
-        self.push_event(
-            None,
-            "chat.pending",
-            format!("Web GPT chat request queued: {id}"),
-        );
-        Ok(
-            serde_json::to_value(self.chat_requests.get(&id).expect("inserted chat request"))
-                .expect("chat request serialization cannot fail"),
-        )
+        let outcome = self.chat.submit(params);
+        self.record_chat_outcome(outcome)
     }
 
     fn claim_pending_chat(&mut self) -> Result<Value, String> {
-        while let Some(id) = self.pending_chat.pop_front() {
-            let Some(request) = self.chat_requests.get_mut(&id) else {
-                continue;
-            };
-            if request.status != WebChatStatus::Pending {
-                continue;
-            }
-            request.status = WebChatStatus::Claimed;
-            request.updated_at_ms = now_ms();
-            let value = serde_json::to_value(&*request)
-                .map_err(|error| format!("Could not serialize chat request: {error}"))?;
-            self.push_event(
-                None,
-                "chat.claimed",
-                format!("Web GPT claimed chat request: {id}"),
-            );
-            return Ok(value);
-        }
-        Ok(Value::Null)
+        let outcome = self.chat.claim_pending();
+        self.record_chat_outcome(outcome)
     }
 
     fn release_chat(&mut self, params: &Value) -> Result<Value, String> {
-        let request_id = required_string(params, "request_id")?;
-        let request = self
-            .chat_requests
-            .get_mut(&request_id)
-            .ok_or_else(|| format!("Unknown chat request: {request_id}"))?;
-        if request.status != WebChatStatus::Claimed {
-            return Err(format!(
-                "Chat request {request_id} is {:?}; only claimed requests can be released",
-                request.status
-            ));
-        }
-        request.status = WebChatStatus::Pending;
-        request.updated_at_ms = now_ms();
-        self.pending_chat.push_front(request_id.clone());
-        self.push_event(
-            None,
-            "chat.released",
-            format!("Web GPT released chat request: {request_id}"),
-        );
-        Ok(serde_json::to_value(
-            self.chat_requests
-                .get(&request_id)
-                .expect("existing chat request"),
-        )
-        .expect("chat request serialization cannot fail"))
+        let outcome = self.chat.release(params);
+        self.record_chat_outcome(outcome)
     }
 
     fn respond_chat(&mut self, params: &Value) -> Result<Value, String> {
-        let request_id = required_string(params, "request_id")?;
-        let text = required_string(params, "text")?;
-        let request = self
-            .chat_requests
-            .get_mut(&request_id)
-            .ok_or_else(|| format!("Unknown chat request: {request_id}"))?;
-        if matches!(
-            request.status,
-            WebChatStatus::Answered | WebChatStatus::Cancelled
-        ) {
-            return Err(format!(
-                "Chat request {request_id} is already {:?}",
-                request.status
-            ));
-        }
-        request.status = WebChatStatus::Answered;
-        request.response = Some(text);
-        request.updated_at_ms = now_ms();
-        self.push_event(
-            None,
-            "chat.answered",
-            format!("Web GPT answered chat request: {request_id}"),
-        );
-        Ok(serde_json::to_value(
-            self.chat_requests
-                .get(&request_id)
-                .expect("existing chat request"),
-        )
-        .expect("chat request serialization cannot fail"))
+        let outcome = self.chat.respond(params);
+        self.record_chat_outcome(outcome)
     }
 
     fn poll_chat(&self, params: &Value) -> Result<Value, String> {
-        let request_id = required_string(params, "request_id")?;
-        self.chat_requests
-            .get(&request_id)
-            .map(|request| {
-                serde_json::to_value(request).expect("chat request serialization cannot fail")
-            })
-            .ok_or_else(|| format!("Unknown chat request: {request_id}"))
+        self.chat.poll(params)
     }
 
     fn cancel_chat(&mut self, params: &Value) -> Result<Value, String> {
-        let request_id = required_string(params, "request_id")?;
-        let request = self
-            .chat_requests
-            .get_mut(&request_id)
-            .ok_or_else(|| format!("Unknown chat request: {request_id}"))?;
-        if request.status != WebChatStatus::Answered {
-            request.status = WebChatStatus::Cancelled;
-            request.updated_at_ms = now_ms();
-            self.pending_chat.retain(|id| id != &request_id);
-        }
-        self.push_event(
-            None,
-            "chat.cancelled",
-            format!("Web GPT chat request cancelled: {request_id}"),
-        );
-        Ok(serde_json::to_value(
-            self.chat_requests
-                .get(&request_id)
-                .expect("existing chat request"),
-        )
-        .expect("chat request serialization cannot fail"))
+        let outcome = self.chat.cancel(params);
+        self.record_chat_outcome(outcome)
     }
 
     fn dispatch_next(&mut self, commands: &Sender<CodexCommand>) {
@@ -829,7 +638,7 @@ impl BridgeState {
             return;
         }
         while let Some(task_id) = self.queue.pop_front() {
-            let Some(task) = self.tasks.get_mut(&task_id) else {
+            let Some(task) = self.task_store.tasks.get_mut(&task_id) else {
                 continue;
             };
             if task.status != OrchestratorTaskStatus::Queued {
@@ -856,7 +665,7 @@ impl BridgeState {
                 })
                 .is_err()
             {
-                if let Some(task) = self.tasks.get_mut(&task_id) {
+                if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                     task.status = OrchestratorTaskStatus::Failed;
                     task.updated_at_ms = now_ms();
                 }
@@ -881,7 +690,7 @@ impl BridgeState {
                     CodexConnection::Ready { version } => format!("Codex runtime ready: {version}"),
                     CodexConnection::Offline { message } => {
                         if let Some(task_id) = self.active_task_id.take()
-                            && let Some(task) = self.tasks.get_mut(&task_id)
+                            && let Some(task) = self.task_store.tasks.get_mut(&task_id)
                         {
                             task.status = OrchestratorTaskStatus::Failed;
                             task.updated_at_ms = now_ms();
@@ -895,7 +704,7 @@ impl BridgeState {
             CodexEvent::TurnStarted { turn_id, .. } => {
                 self.codex_busy = true;
                 if let Some(task_id) = self.active_task_id.clone() {
-                    if let Some(task) = self.tasks.get_mut(&task_id) {
+                    if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                         task.status = OrchestratorTaskStatus::RunningCodex;
                         task.turn_id = Some(turn_id.clone());
                         task.updated_at_ms = now_ms();
@@ -916,12 +725,13 @@ impl BridgeState {
             CodexEvent::AssistantCompleted { turn_id, text, .. } => {
                 if let Some(task_id) = self.active_task_id.clone()
                     && self
+                        .task_store
                         .tasks
                         .get(&task_id)
                         .and_then(|task| task.turn_id.as_deref())
                         == Some(turn_id.as_str())
                 {
-                    if let Some(task) = self.tasks.get_mut(&task_id) {
+                    if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                         task.result = Some(text);
                         task.updated_at_ms = now_ms();
                     }
@@ -947,12 +757,13 @@ impl BridgeState {
                 };
                 if let Some(task_id) = self.active_task_id.clone()
                     && self
+                        .task_store
                         .tasks
                         .get(&task_id)
                         .and_then(|task| task.turn_id.as_deref())
                         == Some(turn_id.as_str())
                 {
-                    if let Some(task) = self.tasks.get_mut(&task_id) {
+                    if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                         if task.tool_activity.len() >= 200 {
                             task.tool_activity.remove(0);
                         }
@@ -968,12 +779,13 @@ impl BridgeState {
                 self.codex_busy = false;
                 if let Some(task_id) = self.active_task_id.take() {
                     let is_matching = self
+                        .task_store
                         .tasks
                         .get(&task_id)
                         .and_then(|task| task.turn_id.as_deref())
                         .is_none_or(|known| known == turn_id);
                     if is_matching {
-                        if let Some(task) = self.tasks.get_mut(&task_id) {
+                        if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                             task.status = if task.cancel_requested {
                                 OrchestratorTaskStatus::Cancelled
                             } else if status.eq_ignore_ascii_case("completed") {
@@ -984,6 +796,7 @@ impl BridgeState {
                             task.updated_at_ms = now_ms();
                         }
                         let terminal_event = self
+                            .task_store
                             .tasks
                             .get(&task_id)
                             .map(|task| match task.status {
@@ -1043,6 +856,7 @@ impl BridgeState {
 
     fn handle_worker_event(&mut self, session_id: &str, event: CodexEvent) {
         let task_id = self
+            .task_store
             .tasks
             .values()
             .find(|task| task.session_id.as_deref() == Some(session_id))
@@ -1058,7 +872,7 @@ impl BridgeState {
                     .set_status(session_id, SessionStatus::WaitingOnWorkers);
             }
             CodexEvent::Connection(CodexConnection::Ready { version }) => {
-                if let Some(task) = self.tasks.get_mut(&task_id) {
+                if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                     task.status = OrchestratorTaskStatus::RunningCodex;
                     task.updated_at_ms = now_ms();
                 }
@@ -1070,7 +884,7 @@ impl BridgeState {
                 );
             }
             CodexEvent::Connection(CodexConnection::Offline { message }) => {
-                if let Some(task) = self.tasks.get_mut(&task_id) {
+                if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                     task.status = OrchestratorTaskStatus::Failed;
                     task.updated_at_ms = now_ms();
                 }
@@ -1079,7 +893,7 @@ impl BridgeState {
                 self.worker_runtimes.remove(session_id);
             }
             CodexEvent::TurnStarted { turn_id, .. } => {
-                if let Some(task) = self.tasks.get_mut(&task_id) {
+                if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                     task.status = OrchestratorTaskStatus::RunningCodex;
                     task.turn_id = Some(turn_id.clone());
                     task.updated_at_ms = now_ms();
@@ -1092,13 +906,13 @@ impl BridgeState {
                 );
             }
             CodexEvent::AssistantDelta { delta, .. } => {
-                if let Some(task) = self.tasks.get_mut(&task_id) {
+                if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                     task.result.get_or_insert_with(String::new).push_str(&delta);
                     task.updated_at_ms = now_ms();
                 }
             }
             CodexEvent::AssistantCompleted { text, .. } => {
-                if let Some(task) = self.tasks.get_mut(&task_id) {
+                if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                     task.result = Some(text);
                     task.updated_at_ms = now_ms();
                 }
@@ -1119,7 +933,7 @@ impl BridgeState {
                         activity.detail
                     )
                 };
-                if let Some(task) = self.tasks.get_mut(&task_id) {
+                if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                     if task.tool_activity.len() >= 200 {
                         task.tool_activity.remove(0);
                     }
@@ -1130,6 +944,7 @@ impl BridgeState {
             }
             CodexEvent::TurnCompleted { status, .. } => {
                 let (task_status, session_status, terminal_event) = if self
+                    .task_store
                     .tasks
                     .get(&task_id)
                     .is_some_and(|task| task.cancel_requested)
@@ -1152,7 +967,7 @@ impl BridgeState {
                         "task.failed",
                     )
                 };
-                if let Some(task) = self.tasks.get_mut(&task_id) {
+                if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                     task.status = task_status;
                     task.updated_at_ms = now_ms();
                 }
@@ -1167,7 +982,7 @@ impl BridgeState {
                 }
             }
             CodexEvent::Error(message) => {
-                if let Some(task) = self.tasks.get_mut(&task_id) {
+                if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                     task.status = OrchestratorTaskStatus::Failed;
                     task.updated_at_ms = now_ms();
                 }
@@ -1207,7 +1022,7 @@ impl BridgeState {
                     .clone()
                     .or_else(|| self.web_worker_queue.front().cloned())
                 {
-                    if let Some(session_id) = self.tasks[&task_id].session_id.clone() {
+                    if let Some(session_id) = self.task_store.tasks[&task_id].session_id.clone() {
                         let _ = self
                             .sessions
                             .set_status(&session_id, SessionStatus::NeedsInput);
@@ -1231,14 +1046,14 @@ impl BridgeState {
                 let Some(task_id) = self.web_task_for_request(&correlation) else {
                     return;
                 };
-                if self.tasks[&task_id].cancel_requested {
+                if self.task_store.tasks[&task_id].cancel_requested {
                     return;
                 }
-                if let Some(task) = self.tasks.get_mut(&task_id) {
+                if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                     task.status = OrchestratorTaskStatus::RunningWebGpt;
                     task.updated_at_ms = now_ms();
                 }
-                if let Some(session_id) = self.tasks[&task_id].session_id.clone() {
+                if let Some(session_id) = self.task_store.tasks[&task_id].session_id.clone() {
                     let _ = self
                         .sessions
                         .set_status(&session_id, SessionStatus::Running);
@@ -1259,11 +1074,11 @@ impl BridgeState {
                 let Some(task_id) = self.web_task_for_request(&correlation) else {
                     return;
                 };
-                if self.tasks[&task_id].cancel_requested {
+                if self.task_store.tasks[&task_id].cancel_requested {
                     return;
                 }
                 let mut activity_event = None;
-                if let Some(task) = self.tasks.get_mut(&task_id) {
+                if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                     if let Some(text) = text.filter(|value| !value.trim().is_empty()) {
                         task.result = Some(text);
                     }
@@ -1293,8 +1108,8 @@ impl BridgeState {
                 let Some(task_id) = self.web_task_for_request(&correlation) else {
                     return;
                 };
-                let cancelled = self.tasks[&task_id].cancel_requested;
-                if let Some(task) = self.tasks.get_mut(&task_id) {
+                let cancelled = self.task_store.tasks[&task_id].cancel_requested;
+                if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                     if !cancelled {
                         task.result = Some(text);
                     }
@@ -1305,7 +1120,7 @@ impl BridgeState {
                     };
                     task.updated_at_ms = now_ms();
                 }
-                if let Some(session_id) = self.tasks[&task_id].session_id.clone() {
+                if let Some(session_id) = self.task_store.tasks[&task_id].session_id.clone() {
                     let _ = self.sessions.set_status(
                         &session_id,
                         if cancelled {
@@ -1337,11 +1152,11 @@ impl BridgeState {
                 let Some(task_id) = self.web_task_for_request(&correlation) else {
                     return;
                 };
-                if let Some(task) = self.tasks.get_mut(&task_id) {
+                if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
                     task.status = OrchestratorTaskStatus::Cancelled;
                     task.updated_at_ms = now_ms();
                 }
-                if let Some(session_id) = self.tasks[&task_id].session_id.clone() {
+                if let Some(session_id) = self.task_store.tasks[&task_id].session_id.clone() {
                     let _ = self
                         .sessions
                         .set_status(&session_id, SessionStatus::Cancelled);
@@ -1376,7 +1191,7 @@ impl BridgeState {
         {
             return None;
         }
-        let task = self.tasks.get(active_task_id)?;
+        let task = self.task_store.tasks.get(active_task_id)?;
         if task.session_id.as_deref() != Some(correlation.session_id.as_str())
             || task.turn_id.as_deref() != Some(correlation.request_id.as_str())
         {
@@ -1408,7 +1223,7 @@ impl BridgeState {
         if !dispatched_but_unleased && !waiting_in_bridge_queue {
             return None;
         }
-        let task = self.tasks.get(task_id)?;
+        let task = self.task_store.tasks.get(task_id)?;
         if task.status != OrchestratorTaskStatus::Preparing
             || task.session_id.as_deref() != Some(request.session_id.as_str())
             || task.turn_id.as_deref() != Some(request.request_id.as_str())
@@ -1422,8 +1237,8 @@ impl BridgeState {
         let Some(task_id) = self.queued_web_task_for_request(request) else {
             return;
         };
-        let session_id = self.tasks[&task_id].session_id.clone();
-        if let Some(task) = self.tasks.get_mut(&task_id) {
+        let session_id = self.task_store.tasks[&task_id].session_id.clone();
+        if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
             task.status = OrchestratorTaskStatus::Cancelled;
             task.updated_at_ms = now_ms();
         }
@@ -1452,7 +1267,7 @@ impl BridgeState {
             return;
         };
         self.active_web_correlation = None;
-        let cancelled = self.tasks[&task_id].cancel_requested;
+        let cancelled = self.task_store.tasks[&task_id].cancel_requested;
         self.finish_web_worker_failure(task_id, message, cancelled);
     }
 
@@ -1464,12 +1279,12 @@ impl BridgeState {
         let Some(task_id) = self.web_task_for_request(correlation) else {
             return;
         };
-        let cancelled = self.tasks[&task_id].cancel_requested;
+        let cancelled = self.task_store.tasks[&task_id].cancel_requested;
         self.finish_web_worker_failure(task_id, message, cancelled);
     }
 
     fn finish_web_worker_failure(&mut self, task_id: String, message: String, cancelled: bool) {
-        if let Some(task) = self.tasks.get_mut(&task_id) {
+        if let Some(task) = self.task_store.tasks.get_mut(&task_id) {
             task.status = if cancelled {
                 OrchestratorTaskStatus::Cancelled
             } else {
@@ -1477,7 +1292,7 @@ impl BridgeState {
             };
             task.updated_at_ms = now_ms();
         }
-        if let Some(session_id) = self.tasks[&task_id].session_id.clone() {
+        if let Some(session_id) = self.task_store.tasks[&task_id].session_id.clone() {
             let _ = self.sessions.set_status(
                 &session_id,
                 if cancelled {
@@ -1551,7 +1366,8 @@ impl BridgeState {
     }
 
     fn worker_task_for_session(&self, session_id: &str) -> Option<&OrchestratorTask> {
-        self.tasks
+        self.task_store
+            .tasks
             .values()
             .find(|task| task.session_id.as_deref() == Some(session_id))
     }
@@ -1852,6 +1668,7 @@ impl BridgeState {
             .and_then(|session| session.parent_session_id.clone());
         let subtree_ids = self.sessions.subtree_ids(&session_id)?;
         let task_ids = self
+            .task_store
             .tasks
             .values()
             .filter(|task| {
@@ -1864,6 +1681,7 @@ impl BridgeState {
 
         for task_id in &task_ids {
             let session_id = self
+                .task_store
                 .tasks
                 .get(task_id)
                 .and_then(|task| task.session_id.clone());
@@ -1873,7 +1691,7 @@ impl BridgeState {
                 runtime.interrupt();
             }
             if self.active_web_task_id.as_deref() == Some(task_id.as_str()) {
-                if let Some(request) = self.tasks.get(task_id).and_then(|task| {
+                if let Some(request) = self.task_store.tasks.get(task_id).and_then(|task| {
                     Some(WebGptTurnRequest::worker(
                         task.session_id.clone()?,
                         task.id.clone(),
@@ -1887,7 +1705,7 @@ impl BridgeState {
                 self.active_web_correlation = None;
             }
             self.web_worker_queue.retain(|queued| queued != task_id);
-            self.tasks.remove(task_id);
+            self.task_store.tasks.remove(task_id);
         }
 
         let removed = self.sessions.remove_subtree(&session_id)?;
@@ -1983,7 +1801,7 @@ impl BridgeState {
                 updated_at_ms: timestamp,
             };
             let prompt = orchestrator_prompt(&task);
-            self.tasks.insert(task_id.clone(), task);
+            self.task_store.tasks.insert(task_id.clone(), task);
             self.sessions
                 .set_status(&session.id, SessionStatus::WaitingOnWorkers)?;
             let _ = self
@@ -2072,9 +1890,9 @@ impl BridgeState {
                 "queued_web_workers": self.web_worker_queue.len(),
                 "active_task_id": self.active_task_id,
                 "queued": self.queue.len(),
-                "task_count": self.tasks.len(),
-                "pending_chat": self.pending_chat.len(),
-                "chat_count": self.chat_requests.len(),
+                "task_count": self.task_store.tasks.len(),
+                "pending_chat": self.chat.pending_len(),
+                "chat_count": self.chat.len(),
                 "project_root": self.project_root,
                 "root_session_id": self.root_session_id,
                 "active_sessions": self.sessions.active_count(&self.project_root.display().to_string()),
@@ -2106,7 +1924,8 @@ impl BridgeState {
             "task.get" => {
                 let id = required_string(&request.params, "task_id");
                 id.and_then(|id| {
-                    self.tasks
+                    self.task_store
+                        .tasks
                         .get(&id)
                         .map(|task| {
                             serde_json::to_value(task).expect("task serialization cannot fail")
@@ -2114,10 +1933,10 @@ impl BridgeState {
                         .ok_or_else(|| format!("Unknown task: {id}"))
                 })
             }
-            "task.list" => Ok(
-                serde_json::to_value(self.tasks.values().collect::<Vec<_>>())
-                    .expect("task list serialization cannot fail"),
-            ),
+            "task.list" => Ok(serde_json::to_value(
+                self.task_store.tasks.values().collect::<Vec<_>>(),
+            )
+            .expect("task list serialization cannot fail")),
             "task.revise" => self.revise_task(&request.params),
             "task.cancel" => self.cancel_task(&request.params, commands),
             "task.approve" => self.approve_task(&request.params),
@@ -2129,6 +1948,7 @@ impl BridgeState {
                     .unwrap_or(0);
                 let task_id = request.params.get("task_id").and_then(Value::as_str);
                 let items = self
+                    .task_store
                     .events
                     .iter()
                     .filter(|event| event.seq > after)
@@ -2163,836 +1983,6 @@ impl BridgeState {
             },
         }
     }
-}
-
-pub(crate) fn spawn_orchestrator_bridge(
-    project_root: PathBuf,
-    commands: Sender<CodexCommand>,
-    codex_events: Receiver<CodexEvent>,
-    web_browser: SharedWebGptBrowser,
-) -> Result<(), String> {
-    if let Some(client) = IN_PROCESS_BRIDGE.get() {
-        let rebind = BRIDGE_REBIND
-            .get()
-            .ok_or_else(|| "Roche bridge rebind channel is unavailable".to_owned())?;
-        rebind
-            .send(BridgeRebind {
-                project_root: project_root.clone(),
-                commands,
-                codex_events,
-                web_browser,
-            })
-            .map_err(|_| "Roche bridge worker is no longer running".to_owned())?;
-        let updated_client = BridgeClientConfig {
-            project_root: project_root.display().to_string(),
-            ..client.clone()
-        };
-        write_bridge_descriptor(&project_root, &updated_client)?;
-        let current_root = BRIDGE_CURRENT_ROOT
-            .get()
-            .ok_or_else(|| "Roche bridge current root is unavailable".to_owned())?;
-        let mut current_root = current_root
-            .lock()
-            .map_err(|_| "Roche bridge current root lock is poisoned".to_owned())?;
-        let previous_root = current_root.clone();
-        if previous_root != project_root {
-            let _ = fs::remove_file(bridge_descriptor_path(&previous_root));
-        }
-        *current_root = project_root;
-        return Ok(());
-    }
-    let listener = bind_bridge_listener()?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|error| format!("Could not configure Roche Web GPT bridge: {error}"))?;
-    let address = listener
-        .local_addr()
-        .map_err(|error| format!("Could not read Roche Web GPT bridge address: {error}"))?
-        .to_string();
-    let token = generate_bridge_token()?;
-    let client = BridgeClientConfig {
-        address,
-        token: token.clone(),
-        pid: std::process::id(),
-        project_root: project_root.display().to_string(),
-    };
-    let (rebind_tx, rebind_rx) = std::sync::mpsc::channel();
-    BRIDGE_REBIND
-        .set(rebind_tx)
-        .map_err(|_| "Roche bridge rebind channel is already initialized".to_owned())?;
-    BRIDGE_CURRENT_ROOT
-        .set(Mutex::new(project_root.clone()))
-        .map_err(|_| "Roche bridge current root is already initialized".to_owned())?;
-    IN_PROCESS_BRIDGE
-        .set(client.clone())
-        .map_err(|_| "Roche Web GPT bridge is already initialized in this process".to_owned())?;
-    write_bridge_descriptor(&project_root, &client)?;
-    thread::Builder::new()
-        .name("roche-webgpt-orchestrator".to_owned())
-        .spawn(move || {
-            bridge_worker(
-                listener,
-                project_root,
-                commands,
-                codex_events,
-                web_browser,
-                rebind_rx,
-                token,
-            )
-        })
-        .map_err(|error| format!("Could not start Roche Web GPT bridge worker: {error}"))?;
-    Ok(())
-}
-
-fn bridge_worker(
-    listener: TcpListener,
-    mut project_root: PathBuf,
-    mut commands: Sender<CodexCommand>,
-    mut codex_events: Receiver<CodexEvent>,
-    mut web_browser: SharedWebGptBrowser,
-    rebind_rx: Receiver<BridgeRebind>,
-    auth_token: String,
-) {
-    let mut state = BridgeState::new(project_root.clone(), auth_token.clone());
-    loop {
-        while let Ok(rebind) = rebind_rx.try_recv() {
-            project_root = rebind.project_root;
-            commands = rebind.commands;
-            codex_events = rebind.codex_events;
-            web_browser = rebind.web_browser;
-            state = BridgeState::new(project_root.clone(), auth_token.clone());
-            state.push_event(
-                None,
-                "runtime.workspace_rebound",
-                format!("Roche bridge rebound to {}", project_root.display()),
-            );
-        }
-        while let Ok(event) = codex_events.try_recv() {
-            state.handle_codex_event(event, &commands);
-        }
-        state.drain_worker_events();
-        for event in web_browser.drain_worker() {
-            state.handle_web_worker_event(event);
-        }
-        for command in state.drain_web_worker_commands() {
-            match command {
-                WebWorkerCommand::EnsureRuntime => {}
-                WebWorkerCommand::Submit { request, text } => {
-                    web_browser.submit_chat(request, text);
-                }
-                WebWorkerCommand::Cancel { request } => {
-                    web_browser.cancel_chat(request);
-                }
-                WebWorkerCommand::ShowLogin => web_browser.show_login(),
-            }
-        }
-        match listener.accept() {
-            Ok((stream, _)) => handle_connection(stream, &mut state, &commands),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => break,
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-}
-
-fn handle_connection(
-    mut stream: TcpStream,
-    state: &mut BridgeState,
-    commands: &Sender<CodexCommand>,
-) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
-    let reader_stream = match stream.try_clone() {
-        Ok(stream) => stream,
-        Err(_) => return,
-    };
-    let mut reader = BufReader::new(reader_stream);
-    let mut line = String::new();
-    if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
-        return;
-    }
-    let response = match serde_json::from_str::<RpcRequest>(&line) {
-        Ok(request) => state.handle_rpc(request, commands),
-        Err(error) => RpcResponse {
-            jsonrpc: "2.0",
-            id: None,
-            result: None,
-            error: Some(RpcError {
-                code: -32700,
-                message: format!("Invalid JSON request: {error}"),
-            }),
-        },
-    };
-    if serde_json::to_writer(&mut stream, &response).is_ok() {
-        let _ = stream.write_all(b"\n");
-        let _ = stream.flush();
-    }
-    let _ = stream.shutdown(Shutdown::Both);
-}
-
-pub fn rpc_call(method: &str, params: Value) -> Result<Value, String> {
-    let client = discover_bridge_client()?;
-    rpc_call_with_client(&client, method, params)
-}
-
-fn rpc_call_with_client(
-    client: &BridgeClientConfig,
-    method: &str,
-    params: Value,
-) -> Result<Value, String> {
-    let address = &client.address;
-    let socket_address = address
-        .parse::<SocketAddr>()
-        .map_err(|error| format!("Invalid Roche bridge address {address}: {error}"))?;
-    if !socket_address.ip().is_loopback() {
-        return Err(format!(
-            "Refusing non-loopback Roche bridge address: {socket_address}"
-        ));
-    }
-    let mut stream =
-        TcpStream::connect_timeout(&socket_address, Duration::from_secs(2)).map_err(|error| {
-            format!("Roche app orchestrator is not reachable at {address}: {error}")
-        })?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|error| error.to_string())?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|error| error.to_string())?;
-    let request = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": method,
-        "params": params,
-        "auth": client.token,
-    });
-    serde_json::to_writer(&mut stream, &request)
-        .map_err(|error| format!("Could not encode Roche bridge request: {error}"))?;
-    stream
-        .write_all(b"\n")
-        .map_err(|error| format!("Could not write Roche bridge request: {error}"))?;
-    stream
-        .flush()
-        .map_err(|error| format!("Could not flush Roche bridge request: {error}"))?;
-    stream
-        .shutdown(Shutdown::Write)
-        .map_err(|error| format!("Could not finish Roche bridge request: {error}"))?;
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .map_err(|error| format!("Could not read Roche bridge response: {error}"))?;
-    let value: Value = serde_json::from_str(&line)
-        .map_err(|error| format!("Invalid Roche bridge response: {error}"))?;
-    if let Some(error) = value.get("error") {
-        let message = error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("Roche orchestrator returned an error");
-        return Err(message.to_owned());
-    }
-    value
-        .get("result")
-        .cloned()
-        .ok_or_else(|| "Roche orchestrator response did not include result".to_owned())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WebGptRuntimeEvent {
-    SessionsUpdated {
-        sessions: Vec<crate::sessions::AgentSession>,
-    },
-    SessionCreated {
-        session: crate::sessions::AgentSession,
-    },
-    SessionRenamed {
-        session: crate::sessions::AgentSession,
-    },
-    SessionDeleted {
-        session_ids: Vec<String>,
-    },
-    WorkerApproved {
-        session_id: String,
-    },
-    Submitted {
-        local_id: String,
-        request_id: String,
-    },
-    Answered {
-        local_id: String,
-        request_id: String,
-        text: String,
-    },
-    Cancelled {
-        local_id: String,
-        request_id: String,
-    },
-    Error {
-        local_id: Option<String>,
-        message: String,
-    },
-}
-
-#[derive(Debug)]
-enum WebGptRuntimeCommand {
-    Submit {
-        local_id: String,
-        text: String,
-        reasoning_level: String,
-    },
-    Cancel {
-        request_id: String,
-    },
-    CreateSession {
-        title: String,
-    },
-    RenameSession {
-        session_id: String,
-        title: String,
-    },
-    DeleteSession {
-        session_id: String,
-    },
-    ApproveWorker {
-        session_id: String,
-    },
-    Shutdown,
-}
-
-#[derive(Debug)]
-struct PendingUiRequest {
-    local_id: String,
-    next_poll: Instant,
-}
-
-pub struct WebGptRuntimeController {
-    commands: Sender<WebGptRuntimeCommand>,
-    events: Receiver<WebGptRuntimeEvent>,
-}
-
-impl WebGptRuntimeController {
-    pub fn spawn() -> Self {
-        let (command_tx, command_rx) = std::sync::mpsc::channel();
-        let (event_tx, event_rx) = std::sync::mpsc::channel();
-        thread::Builder::new()
-            .name("roche-webgpt-runtime".to_owned())
-            .spawn(move || webgpt_runtime_worker(command_rx, event_tx))
-            .expect("failed to start Roche Web GPT runtime worker");
-        Self {
-            commands: command_tx,
-            events: event_rx,
-        }
-    }
-
-    pub fn submit(&self, text: String, reasoning_level: String) -> String {
-        let local_id = format!(
-            "local-chat-{}-{}",
-            now_ms(),
-            TASK_COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
-        let _ = self.commands.send(WebGptRuntimeCommand::Submit {
-            local_id: local_id.clone(),
-            text,
-            reasoning_level,
-        });
-        local_id
-    }
-
-    pub fn cancel(&self, request_id: String) {
-        let _ = self
-            .commands
-            .send(WebGptRuntimeCommand::Cancel { request_id });
-    }
-
-    pub fn create_session(&self, title: String) {
-        let _ = self
-            .commands
-            .send(WebGptRuntimeCommand::CreateSession { title });
-    }
-
-    pub fn rename_session(&self, session_id: String, title: String) {
-        let _ = self
-            .commands
-            .send(WebGptRuntimeCommand::RenameSession { session_id, title });
-    }
-
-    pub fn delete_session(&self, session_id: String) {
-        let _ = self
-            .commands
-            .send(WebGptRuntimeCommand::DeleteSession { session_id });
-    }
-
-    pub fn approve_worker(&self, session_id: String) {
-        let _ = self
-            .commands
-            .send(WebGptRuntimeCommand::ApproveWorker { session_id });
-    }
-
-    pub fn drain(&self) -> Vec<WebGptRuntimeEvent> {
-        let mut events = Vec::new();
-        while let Ok(event) = self.events.try_recv() {
-            events.push(event);
-        }
-        events
-    }
-}
-
-impl Drop for WebGptRuntimeController {
-    fn drop(&mut self) {
-        let _ = self.commands.send(WebGptRuntimeCommand::Shutdown);
-    }
-}
-
-fn webgpt_runtime_worker(
-    commands: Receiver<WebGptRuntimeCommand>,
-    events: Sender<WebGptRuntimeEvent>,
-) {
-    let mut pending: HashMap<String, PendingUiRequest> = HashMap::new();
-    let mut next_session_poll = Instant::now();
-    let mut running = true;
-    while running {
-        match commands.recv_timeout(Duration::from_millis(40)) {
-            Ok(WebGptRuntimeCommand::Submit {
-                local_id,
-                text,
-                reasoning_level,
-            }) => match rpc_call(
-                "chat.submit",
-                json!({"text": text, "reasoning_level": reasoning_level}),
-            ) {
-                Ok(value) => {
-                    if let Some(request_id) = value.get("id").and_then(Value::as_str) {
-                        let request_id = request_id.to_owned();
-                        pending.insert(
-                            request_id.clone(),
-                            PendingUiRequest {
-                                local_id: local_id.clone(),
-                                next_poll: Instant::now(),
-                            },
-                        );
-                        let _ = events.send(WebGptRuntimeEvent::Submitted {
-                            local_id,
-                            request_id,
-                        });
-                    } else {
-                        let _ = events.send(WebGptRuntimeEvent::Error {
-                            local_id: Some(local_id),
-                            message: "chat.submit response did not include request id".to_owned(),
-                        });
-                    }
-                }
-                Err(message) => {
-                    let _ = events.send(WebGptRuntimeEvent::Error {
-                        local_id: Some(local_id),
-                        message,
-                    });
-                }
-            },
-            Ok(WebGptRuntimeCommand::Cancel { request_id }) => {
-                let local_id = pending
-                    .get(&request_id)
-                    .map(|request| request.local_id.clone());
-                if let Err(message) = rpc_call("chat.cancel", json!({"request_id": request_id})) {
-                    let _ = events.send(WebGptRuntimeEvent::Error { local_id, message });
-                }
-            }
-            Ok(WebGptRuntimeCommand::CreateSession { title }) => {
-                match rpc_call("session.create", json!({"title": title})) {
-                    Ok(value) => match serde_json::from_value(value) {
-                        Ok(session) => {
-                            let _ = events.send(WebGptRuntimeEvent::SessionCreated { session });
-                        }
-                        Err(error) => {
-                            let _ = events.send(WebGptRuntimeEvent::Error {
-                                local_id: None,
-                                message: format!("session.create response was invalid: {error}"),
-                            });
-                        }
-                    },
-                    Err(message) => {
-                        let _ = events.send(WebGptRuntimeEvent::Error {
-                            local_id: None,
-                            message,
-                        });
-                    }
-                }
-            }
-            Ok(WebGptRuntimeCommand::RenameSession { session_id, title }) => {
-                match rpc_call(
-                    "session.rename",
-                    json!({"session_id": session_id, "title": title}),
-                ) {
-                    Ok(value) => match serde_json::from_value(value) {
-                        Ok(session) => {
-                            let _ = events.send(WebGptRuntimeEvent::SessionRenamed { session });
-                        }
-                        Err(error) => {
-                            let _ = events.send(WebGptRuntimeEvent::Error {
-                                local_id: None,
-                                message: format!("session.rename response was invalid: {error}"),
-                            });
-                        }
-                    },
-                    Err(message) => {
-                        let _ = events.send(WebGptRuntimeEvent::Error {
-                            local_id: None,
-                            message,
-                        });
-                    }
-                }
-            }
-            Ok(WebGptRuntimeCommand::DeleteSession { session_id }) => {
-                match rpc_call("session.delete", json!({"session_id": session_id})) {
-                    Ok(value) => {
-                        match serde_json::from_value::<Vec<crate::sessions::AgentSession>>(value) {
-                            Ok(sessions) => {
-                                let session_ids =
-                                    sessions.into_iter().map(|session| session.id).collect();
-                                let _ =
-                                    events.send(WebGptRuntimeEvent::SessionDeleted { session_ids });
-                            }
-                            Err(error) => {
-                                let _ = events.send(WebGptRuntimeEvent::Error {
-                                    local_id: None,
-                                    message: format!(
-                                        "session.delete response was invalid: {error}"
-                                    ),
-                                });
-                            }
-                        }
-                    }
-                    Err(message) => {
-                        let _ = events.send(WebGptRuntimeEvent::Error {
-                            local_id: None,
-                            message,
-                        });
-                    }
-                }
-            }
-            Ok(WebGptRuntimeCommand::ApproveWorker { session_id }) => {
-                match rpc_call("worker.approve", json!({"agent_id": session_id})) {
-                    Ok(_) => {
-                        let _ = events.send(WebGptRuntimeEvent::WorkerApproved { session_id });
-                        next_session_poll = Instant::now();
-                    }
-                    Err(message) => {
-                        let _ = events.send(WebGptRuntimeEvent::Error {
-                            local_id: None,
-                            message,
-                        });
-                    }
-                }
-            }
-            Ok(WebGptRuntimeCommand::Shutdown) => running = false,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-        }
-        if !running {
-            break;
-        }
-
-        let now = Instant::now();
-        if now >= next_session_poll {
-            if let Ok(value) = rpc_call("session.list", json!({}))
-                && let Ok(sessions) =
-                    serde_json::from_value::<Vec<crate::sessions::AgentSession>>(value)
-            {
-                let _ = events.send(WebGptRuntimeEvent::SessionsUpdated { sessions });
-            }
-            next_session_poll = now + Duration::from_millis(750);
-        }
-
-        let due = pending
-            .iter()
-            .filter(|(_, request)| request.next_poll <= now)
-            .map(|(request_id, request)| (request_id.clone(), request.local_id.clone()))
-            .collect::<Vec<_>>();
-        for (request_id, local_id) in due {
-            match rpc_call("chat.poll", json!({"request_id": request_id})) {
-                Ok(value) => match value.get("status").and_then(Value::as_str) {
-                    Some("answered") => {
-                        let text = value
-                            .get("response")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned();
-                        pending.remove(&request_id);
-                        let _ = events.send(WebGptRuntimeEvent::Answered {
-                            local_id,
-                            request_id,
-                            text,
-                        });
-                    }
-                    Some("cancelled") => {
-                        pending.remove(&request_id);
-                        let _ = events.send(WebGptRuntimeEvent::Cancelled {
-                            local_id,
-                            request_id,
-                        });
-                    }
-                    _ => {
-                        if let Some(request) = pending.get_mut(&request_id) {
-                            request.next_poll = now + UI_POLL_INTERVAL;
-                        }
-                    }
-                },
-                Err(message) => {
-                    if let Some(request) = pending.get_mut(&request_id) {
-                        request.next_poll = now + Duration::from_secs(1);
-                    }
-                    let _ = events.send(WebGptRuntimeEvent::Error {
-                        local_id: Some(local_id),
-                        message,
-                    });
-                }
-            }
-        }
-    }
-}
-
-fn orchestrator_prompt(task: &OrchestratorTask) -> String {
-    let acceptance = if task.acceptance.is_empty() {
-        "- Preserve existing behavior outside the requested change.\n- Run relevant deterministic checks before reporting done."
-            .to_owned()
-    } else {
-        task.acceptance
-            .iter()
-            .map(|item| format!("- {item}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    format!(
-        "Roche Task {}\nTitle: {}\n\nGoal:\n{}\n\nAcceptance criteria:\n{}\n\nRuntime contract:\n- Work only in the current Roche project root.\n- Inspect applicable AGENTS.md before editing.\n- Implement the goal; do not redesign unrelated UI or architecture.\n- Run relevant tests/checks.\n- Finish with a concise summary of changes and verification.\n- Do not mark the product task complete yourself; Rust Orchestrator owns completion state.",
-        task.id, task.title, task.goal, acceptance
-    )
-}
-
-fn project_snapshot(root: &Path) -> Result<ProjectSnapshot, String> {
-    let status_short = git_output(root, ["status", "--short"])?;
-    let diff_stat = git_output(root, ["diff", "--stat"])?;
-    let changed_files = git_output(root, ["diff", "--name-only"])?
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect();
-    Ok(ProjectSnapshot {
-        root: root.display().to_string(),
-        status_short,
-        diff_stat,
-        changed_files,
-    })
-}
-
-fn git_output<const N: usize>(root: &Path, args: [&str; N]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .map_err(|error| format!("Could not run git: {error}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}
-
-fn required_string(params: &Value, name: &str) -> Result<String, String> {
-    params
-        .get(name)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| format!("Missing non-empty parameter: {name}"))
-}
-
-fn parse_session_runtime(value: &str) -> Result<SessionRuntime, String> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "unified" | "mixed" => Ok(SessionRuntime::Unified),
-        "web" | "web_gpt" | "webgpt" | "gpt" | "gpt-5.6" => Ok(SessionRuntime::WebGpt),
-        "codex" => Ok(SessionRuntime::Codex),
-        other => Err(format!("Unsupported session runtime: {other}")),
-    }
-}
-
-fn parse_session_status(value: &str) -> Result<SessionStatus, String> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "idle" => Ok(SessionStatus::Idle),
-        "running" => Ok(SessionStatus::Running),
-        "waiting_on_workers" | "waiting" => Ok(SessionStatus::WaitingOnWorkers),
-        "needs_input" => Ok(SessionStatus::NeedsInput),
-        "completed" => Ok(SessionStatus::Completed),
-        "failed" => Ok(SessionStatus::Failed),
-        "cancelled" | "canceled" => Ok(SessionStatus::Cancelled),
-        "offline" => Ok(SessionStatus::Offline),
-        other => Err(format!("Unsupported session status: {other}")),
-    }
-}
-
-fn normalize_effort(value: &str) -> Result<String, String> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "low" | "fast" | "빠름" => Ok("low".to_owned()),
-        "medium" => Ok("medium".to_owned()),
-        "high" | "높음" => Ok("high".to_owned()),
-        "xhigh" | "very_high" | "very-high" | "매우 높음" => Ok("xhigh".to_owned()),
-        other => Err(format!("Unsupported reasoning effort: {other}")),
-    }
-}
-
-fn next_task_id() -> String {
-    let count = TASK_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("task-{}-{count}", now_ms())
-}
-
-fn now_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-}
-
-pub fn bridge_addr() -> String {
-    discover_bridge_client()
-        .map(|client| client.address)
-        .unwrap_or_else(|_| DEFAULT_WEBGPT_BRIDGE_ADDR.to_owned())
-}
-
-fn validated_bridge_addr() -> Result<SocketAddr, String> {
-    let configured = std::env::var("ROCHE_WEBGPT_BRIDGE_ADDR")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_WEBGPT_BRIDGE_ADDR.to_owned());
-    let address = configured
-        .parse::<SocketAddr>()
-        .map_err(|error| format!("Invalid Roche bridge address {configured}: {error}"))?;
-    if !address.ip().is_loopback() {
-        return Err(format!(
-            "Refusing non-loopback Roche bridge bind address: {address}"
-        ));
-    }
-    Ok(address)
-}
-
-fn bind_bridge_listener() -> Result<TcpListener, String> {
-    let configured = validated_bridge_addr()?;
-    match TcpListener::bind(configured) {
-        Ok(listener) => Ok(listener),
-        Err(error)
-            if error.kind() == std::io::ErrorKind::AddrInUse
-                && std::env::var_os("ROCHE_WEBGPT_BRIDGE_ADDR").is_none() =>
-        {
-            TcpListener::bind("127.0.0.1:0").map_err(|fallback_error| {
-                format!(
-                    "Could not bind Roche Web GPT bridge at {configured} ({error}) or fallback loopback port ({fallback_error})"
-                )
-            })
-        }
-        Err(error) => Err(format!(
-            "Could not bind Roche Web GPT bridge at {configured}: {error}"
-        )),
-    }
-}
-
-fn generate_bridge_token() -> Result<String, String> {
-    let mut bytes = [0_u8; 32];
-    getrandom::fill(&mut bytes)
-        .map_err(|error| format!("Could not generate Roche bridge capability token: {error}"))?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
-fn capability_matches(expected: &str, provided: Option<&str>) -> bool {
-    let Some(provided) = provided else {
-        return false;
-    };
-    let expected = expected.as_bytes();
-    let provided = provided.as_bytes();
-    if expected.len() != provided.len() {
-        return false;
-    }
-    expected
-        .iter()
-        .zip(provided)
-        .fold(0_u8, |diff, (left, right)| diff | (left ^ right))
-        == 0
-}
-
-fn bridge_descriptor_path(project_root: &Path) -> PathBuf {
-    project_root.join(BRIDGE_DESCRIPTOR_RELATIVE_PATH)
-}
-
-fn write_bridge_descriptor(project_root: &Path, client: &BridgeClientConfig) -> Result<(), String> {
-    let path = bridge_descriptor_path(project_root);
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("Invalid Roche bridge descriptor path: {}", path.display()))?;
-    fs::create_dir_all(parent).map_err(|error| {
-        format!(
-            "Could not create Roche bridge descriptor directory {}: {error}",
-            parent.display()
-        )
-    })?;
-    let encoded = serde_json::to_vec_pretty(client)
-        .map_err(|error| format!("Could not encode Roche bridge descriptor: {error}"))?;
-    fs::write(&path, encoded).map_err(|error| {
-        format!(
-            "Could not write Roche bridge descriptor {}: {error}",
-            path.display()
-        )
-    })
-}
-
-fn discover_bridge_client() -> Result<BridgeClientConfig, String> {
-    if let Some(client) = IN_PROCESS_BRIDGE.get() {
-        return Ok(client.clone());
-    }
-
-    let mut roots = Vec::new();
-    if let Some(root) = std::env::var_os("ROCHE_PROJECT_ROOT") {
-        roots.push(PathBuf::from(root));
-    }
-    if let Ok(current) = std::env::current_dir() {
-        roots.push(current);
-    }
-    if let Ok(executable) = std::env::current_exe()
-        && let Some(parent) = executable.parent()
-    {
-        roots.extend(parent.ancestors().take(4).map(Path::to_path_buf));
-    }
-
-    roots.dedup();
-    for root in roots {
-        let path = bridge_descriptor_path(&root);
-        let Ok(bytes) = fs::read(&path) else {
-            continue;
-        };
-        let client = serde_json::from_slice::<BridgeClientConfig>(&bytes).map_err(|error| {
-            format!(
-                "Invalid Roche bridge descriptor {}: {error}",
-                path.display()
-            )
-        })?;
-        let address = client.address.parse::<SocketAddr>().map_err(|error| {
-            format!(
-                "Invalid Roche bridge descriptor address {}: {error}",
-                client.address
-            )
-        })?;
-        if !address.ip().is_loopback() {
-            return Err(format!(
-                "Refusing non-loopback Roche bridge descriptor address: {address}"
-            ));
-        }
-        if client.token.len() < 64 {
-            return Err("Roche bridge descriptor contains an invalid capability token".to_owned());
-        }
-        return Ok(client);
-    }
-
-    Err(format!(
-        "Roche bridge descriptor not found. Start Roche in this project first (expected {BRIDGE_DESCRIPTOR_RELATIVE_PATH})."
-    ))
 }
 
 #[cfg(test)]
@@ -3033,6 +2023,52 @@ mod tests {
         assert_eq!(normalize_effort("높음").unwrap(), "high");
         assert_eq!(normalize_effort("매우 높음").unwrap(), "xhigh");
         assert!(normalize_effort("ultra").is_err());
+    }
+
+    #[test]
+    fn bridge_chat_mailbox_preserves_fifo_release_and_event_contract() {
+        let mut state = BridgeState::new(PathBuf::from("C:/repo"), "test-token".to_owned());
+        let submitted = state
+            .submit_chat(&json!({"text": "question", "reasoning_level": "high"}))
+            .expect("submit chat");
+        let request_id = submitted["id"].as_str().expect("request id").to_owned();
+
+        let claimed = state.claim_pending_chat().expect("claim chat");
+        assert_eq!(claimed["id"], request_id);
+        state
+            .release_chat(&json!({"request_id": request_id.clone()}))
+            .expect("release chat");
+        let reclaimed = state.claim_pending_chat().expect("reclaim chat");
+        assert_eq!(reclaimed["id"], request_id);
+        let answered = state
+            .respond_chat(&json!({
+                "request_id": request_id.clone(),
+                "text": "answer"
+            }))
+            .expect("answer chat");
+        assert_eq!(answered["status"], "answered");
+        let cancelled_after_answer = state
+            .cancel_chat(&json!({"request_id": request_id}))
+            .expect("cancel answered chat");
+        assert_eq!(cancelled_after_answer["status"], "answered");
+
+        let event_names = state
+            .task_store
+            .events
+            .iter()
+            .map(|event| event.event.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            event_names,
+            [
+                "chat.pending",
+                "chat.claimed",
+                "chat.released",
+                "chat.claimed",
+                "chat.answered",
+                "chat.cancelled",
+            ]
+        );
     }
 
     #[test]
@@ -3113,7 +2149,7 @@ mod tests {
             other => panic!("unexpected command: {other:?}"),
         }
         assert_eq!(
-            state.tasks[&task_id].status,
+            state.task_store.tasks[&task_id].status,
             OrchestratorTaskStatus::Preparing
         );
         state.handle_codex_event(
@@ -3124,7 +2160,7 @@ mod tests {
             &command_tx,
         );
         assert_eq!(
-            state.tasks[&task_id].status,
+            state.task_store.tasks[&task_id].status,
             OrchestratorTaskStatus::RunningCodex
         );
         state.handle_codex_event(
@@ -3136,14 +2172,14 @@ mod tests {
             &command_tx,
         );
         assert_eq!(
-            state.tasks[&task_id].status,
+            state.task_store.tasks[&task_id].status,
             OrchestratorTaskStatus::NeedsReview
         );
         state
             .approve_task(&json!({"task_id": task_id.clone()}))
             .unwrap();
         assert_eq!(
-            state.tasks[&task_id].status,
+            state.task_store.tasks[&task_id].status,
             OrchestratorTaskStatus::Completed
         );
         assert_eq!(
@@ -3218,6 +2254,7 @@ mod tests {
             .unwrap();
         let session_id = session["id"].as_str().unwrap().to_owned();
         let task_id = state
+            .task_store
             .tasks
             .values()
             .find(|task| task.session_id.as_deref() == Some(session_id.as_str()))
@@ -3252,7 +2289,7 @@ mod tests {
             correlation: correlation.clone(),
         });
         assert_eq!(
-            state.tasks[&task_id].status,
+            state.task_store.tasks[&task_id].status,
             OrchestratorTaskStatus::RunningWebGpt
         );
         state.handle_web_worker_event(WebGptBrowserEvent::ChatProgress {
@@ -3261,9 +2298,12 @@ mod tests {
             activity: Some("Searching repository".to_owned()),
             thinking: false,
         });
-        assert_eq!(state.tasks[&task_id].result.as_deref(), Some("Working"));
         assert_eq!(
-            state.tasks[&task_id].tool_activity,
+            state.task_store.tasks[&task_id].result.as_deref(),
+            Some("Working")
+        );
+        assert_eq!(
+            state.task_store.tasks[&task_id].tool_activity,
             vec!["Searching repository"]
         );
         state.handle_web_worker_event(WebGptBrowserEvent::ChatAnswered {
@@ -3271,7 +2311,7 @@ mod tests {
             text: "Final evidence".to_owned(),
         });
         assert_eq!(
-            state.tasks[&task_id].status,
+            state.task_store.tasks[&task_id].status,
             OrchestratorTaskStatus::NeedsReview
         );
         assert_eq!(
@@ -3282,7 +2322,7 @@ mod tests {
             .approve_task(&json!({"task_id": task_id.clone()}))
             .unwrap();
         assert_eq!(
-            state.tasks[&task_id].status,
+            state.task_store.tasks[&task_id].status,
             OrchestratorTaskStatus::Completed
         );
     }
@@ -3295,6 +2335,7 @@ mod tests {
             .session_spawn(&json!({"runtime": "web_gpt", "goal": "First"}))
             .unwrap();
         let task_id = state
+            .task_store
             .tasks
             .values()
             .find(|task| task.session_id.as_deref() == session["id"].as_str())
@@ -3326,7 +2367,7 @@ mod tests {
         assert_eq!(state.active_web_task_id.as_deref(), Some(task_id.as_str()));
         assert_eq!(state.active_web_correlation, None);
         assert_eq!(
-            state.tasks[&task_id].status,
+            state.task_store.tasks[&task_id].status,
             OrchestratorTaskStatus::Preparing
         );
 
@@ -3335,7 +2376,7 @@ mod tests {
         });
         assert_eq!(state.active_web_correlation, Some(valid.clone()));
         assert_eq!(
-            state.tasks[&task_id].status,
+            state.task_store.tasks[&task_id].status,
             OrchestratorTaskStatus::RunningWebGpt
         );
 
@@ -3350,7 +2391,7 @@ mod tests {
             correlation: stale_generation,
             text: "stale answer".to_owned(),
         });
-        assert_eq!(state.tasks[&task_id].result, None);
+        assert_eq!(state.task_store.tasks[&task_id].result, None);
         assert_eq!(state.active_web_task_id.as_deref(), Some(task_id.as_str()));
 
         state.handle_web_worker_event(WebGptBrowserEvent::ChatAnswered {
@@ -3358,7 +2399,7 @@ mod tests {
             text: "valid answer".to_owned(),
         });
         assert_eq!(
-            state.tasks[&task_id].status,
+            state.task_store.tasks[&task_id].status,
             OrchestratorTaskStatus::NeedsReview
         );
         assert_eq!(state.active_web_task_id, None);
@@ -3376,6 +2417,7 @@ mod tests {
             .unwrap();
         let second_session = second["id"].as_str().unwrap().to_owned();
         let second_task = state
+            .task_store
             .tasks
             .values()
             .find(|task| task.session_id.as_deref() == Some(second_session.as_str()))
@@ -3383,6 +2425,7 @@ mod tests {
             .id
             .clone();
         let first_task = state
+            .task_store
             .tasks
             .values()
             .find(|task| task.session_id.as_deref() == first["id"].as_str())
@@ -3390,7 +2433,12 @@ mod tests {
             .id
             .clone();
         let second_request_id = format!("web-worker-{second_task}-r0");
-        state.tasks.get_mut(&second_task).unwrap().turn_id = Some(second_request_id.clone());
+        state
+            .task_store
+            .tasks
+            .get_mut(&second_task)
+            .unwrap()
+            .turn_id = Some(second_request_id.clone());
         let wrong = WebGptTurnRequest::worker(
             "session-other".to_owned(),
             second_task.clone(),
@@ -3398,7 +2446,7 @@ mod tests {
         );
         state.handle_web_worker_event(WebGptBrowserEvent::ChatQueueCancelled { request: wrong });
         assert_eq!(
-            state.tasks[&second_task].status,
+            state.task_store.tasks[&second_task].status,
             OrchestratorTaskStatus::Preparing
         );
         assert_eq!(
@@ -3410,7 +2458,7 @@ mod tests {
             WebGptTurnRequest::worker(second_session, second_task.clone(), second_request_id);
         state.handle_web_worker_event(WebGptBrowserEvent::ChatQueueCancelled { request: valid });
         assert_eq!(
-            state.tasks[&second_task].status,
+            state.task_store.tasks[&second_task].status,
             OrchestratorTaskStatus::Cancelled
         );
         assert_eq!(
@@ -3432,6 +2480,7 @@ mod tests {
             .unwrap();
         let first_session = first["id"].as_str().unwrap().to_owned();
         let first_task = state
+            .task_store
             .tasks
             .values()
             .find(|task| task.session_id.as_deref() == Some(first_session.as_str()))
@@ -3439,6 +2488,7 @@ mod tests {
             .id
             .clone();
         let second_task = state
+            .task_store
             .tasks
             .values()
             .find(|task| task.session_id.as_deref() == second["id"].as_str())
@@ -3464,7 +2514,7 @@ mod tests {
         });
 
         assert_eq!(
-            state.tasks[&first_task].status,
+            state.task_store.tasks[&first_task].status,
             OrchestratorTaskStatus::Cancelled
         );
         assert_eq!(
@@ -3499,6 +2549,7 @@ mod tests {
         let second_session = second["id"].as_str().unwrap();
         let third_session = third["id"].as_str().unwrap();
         let first_task = state
+            .task_store
             .tasks
             .values()
             .find(|task| task.session_id.as_deref() == Some(first_session))
@@ -3506,6 +2557,7 @@ mod tests {
             .id
             .clone();
         let second_task = state
+            .task_store
             .tasks
             .values()
             .find(|task| task.session_id.as_deref() == Some(second_session))
@@ -3513,6 +2565,7 @@ mod tests {
             .id
             .clone();
         let third_task = state
+            .task_store
             .tasks
             .values()
             .find(|task| task.session_id.as_deref() == Some(third_session))
@@ -3536,7 +2589,7 @@ mod tests {
             1
         );
         assert_eq!(
-            state.tasks[&second_task].status,
+            state.task_store.tasks[&second_task].status,
             OrchestratorTaskStatus::Preparing
         );
 
@@ -3563,12 +2616,12 @@ mod tests {
             activity: Some("late activity".to_owned()),
             thinking: false,
         });
-        assert!(state.tasks[&first_task].result.is_none());
+        assert!(state.task_store.tasks[&first_task].result.is_none());
         state.handle_web_worker_event(WebGptBrowserEvent::ChatCancelled {
             correlation: first_correlation.clone(),
         });
         assert_eq!(
-            state.tasks[&first_task].status,
+            state.task_store.tasks[&first_task].status,
             OrchestratorTaskStatus::Cancelled
         );
         let next = state.drain_web_worker_commands();
@@ -3583,7 +2636,7 @@ mod tests {
             Some(second_task.as_str())
         );
         assert_eq!(
-            state.tasks[&third_task].status,
+            state.task_store.tasks[&third_task].status,
             OrchestratorTaskStatus::Preparing
         );
         state.handle_web_worker_event(WebGptBrowserEvent::ChatAnswered {
@@ -3591,7 +2644,7 @@ mod tests {
             text: "late".to_owned(),
         });
         assert_eq!(
-            state.tasks[&first_task].status,
+            state.task_store.tasks[&first_task].status,
             OrchestratorTaskStatus::Cancelled
         );
         assert_eq!(
@@ -3599,7 +2652,7 @@ mod tests {
             Some(second_task.as_str())
         );
         assert_eq!(
-            state.tasks[&third_task].status,
+            state.task_store.tasks[&third_task].status,
             OrchestratorTaskStatus::Preparing
         );
     }
@@ -3617,6 +2670,7 @@ mod tests {
         let first_session = first["id"].as_str().unwrap();
         let second_session = second["id"].as_str().unwrap();
         let first_task = state
+            .task_store
             .tasks
             .values()
             .find(|task| task.session_id.as_deref() == Some(first_session))
@@ -3624,6 +2678,7 @@ mod tests {
             .id
             .clone();
         let second_task = state
+            .task_store
             .tasks
             .values()
             .find(|task| task.session_id.as_deref() == Some(second_session))
@@ -3645,7 +2700,7 @@ mod tests {
             message: "first failed".to_owned(),
         });
         assert_eq!(
-            state.tasks[&first_task].status,
+            state.task_store.tasks[&first_task].status,
             OrchestratorTaskStatus::Failed
         );
         assert_eq!(
@@ -3669,7 +2724,7 @@ mod tests {
             Some(second_task.as_str())
         );
         assert_eq!(
-            state.tasks[&second_task].status,
+            state.task_store.tasks[&second_task].status,
             OrchestratorTaskStatus::Preparing
         );
         assert!(state.drain_web_worker_commands().is_empty());
@@ -3688,6 +2743,7 @@ mod tests {
         let first_session = first["id"].as_str().unwrap();
         let second_session = second["id"].as_str().unwrap();
         let first_task = state
+            .task_store
             .tasks
             .values()
             .find(|task| task.session_id.as_deref() == Some(first_session))
@@ -3695,6 +2751,7 @@ mod tests {
             .id
             .clone();
         let second_task = state
+            .task_store
             .tasks
             .values()
             .find(|task| task.session_id.as_deref() == Some(second_session))
@@ -3711,15 +2768,15 @@ mod tests {
             Some(first_task.as_str())
         );
         assert_eq!(
-            state.tasks[&first_task].status,
+            state.task_store.tasks[&first_task].status,
             OrchestratorTaskStatus::Preparing
         );
         assert_eq!(
-            state.tasks[&second_task].status,
+            state.task_store.tasks[&second_task].status,
             OrchestratorTaskStatus::Preparing
         );
         assert!(state.drain_web_worker_commands().is_empty());
-        assert!(state.events.iter().any(|event| {
+        assert!(state.task_store.events.iter().any(|event| {
             event.event == "runtime.web_gpt_error"
                 && event.summary == "cancel diagnostic for web-worker-first"
         }));
@@ -3732,6 +2789,7 @@ mod tests {
             .session_spawn(&json!({"runtime": "web_gpt", "goal": "Queued"}))
             .unwrap();
         let task_id = state
+            .task_store
             .tasks
             .values()
             .find(|task| task.session_id.as_deref() == session["id"].as_str())
@@ -3751,7 +2809,7 @@ mod tests {
         )));
 
         assert_eq!(
-            state.tasks[&task_id].status,
+            state.task_store.tasks[&task_id].status,
             OrchestratorTaskStatus::Preparing
         );
         assert!(

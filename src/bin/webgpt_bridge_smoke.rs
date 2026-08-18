@@ -14,7 +14,7 @@ mod web_browser_pool;
 #[path = "../web_browser_protocol.rs"]
 mod web_browser_protocol;
 #[allow(dead_code)]
-#[path = "../webgpt.rs"]
+#[path = "../webgpt/mod.rs"]
 mod webgpt;
 
 use std::{path::PathBuf, thread, time::Duration};
