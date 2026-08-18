@@ -11,26 +11,11 @@ In repositories indexed by CodeGraph (a `.codegraph/` directory exists at the re
 If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is the user's decision.
 <!-- CODEGRAPH_END -->
 
-<!-- CHATGPT_ORACLE_ROUTING_START -->
-## ChatGPT Web Orchestration
+## Orchestration terminology
 
-When the user explicitly asks to use web GPT, GPT review/edit/orchestration, Pro, Web Multi-GPT, deep research, or comprehensive mode, route the request through the installed ChatGPT Oracle skills instead of inventing a browser workflow.
-
-- The installed `codexpro-automation` package and its `docs/GLOBAL_CHATGPT_ROUTING.md` are the authoritative routing source. Preserve unrelated personal rules when refreshing this block.
-
-- Regular `GPT`/`direct`, `plan`, `review`, `edit`, and `orchestrator` work must use the `chatgpt-thinking-browser` skill and its `chatgpt_oracle_dispatch.py` entrypoint; deep research, Web Multi-GPT, and comprehensive work use their corresponding Oracle skills. Regular modes use the manually registered `DevSpace` ChatGPT app.
-- Standalone `Pro` uses the `chatgpt-pro-browser` skill, Oracle attachments only, and never DevSpace.
-- Comprehensive mode uses `chatgpt-pro-plan-handoff`; it owns plan, optional Pro/Web Multi, review, implementation, and the final deterministic gate.
-- Use `orchestrator` when the goal and approach are already settled and one web-GPT pass should implement and test it.
-- Requests such as "use web GPT to finish this", "implement it to completion", `오케스트라`, or `지휘` must trigger `chatgpt-thinking-browser`; never construct a raw `oracle`/`npx @steipete/oracle` command, select GPT 5.5/Pro, reuse a shared manual-login browser, or set `--browser-model-strategy ignore` for a new regular run.
-- Before a live orchestrator submission, its dispatcher dry-run must prove `mode=orchestrator`, `transport=devspace`, `model=gpt-5.6`, `model_strategy=select`, `thinking_time=heavy`, app `DevSpace`, zero attachments, and the exact root and absolute mission. The live run must verify visible `GPT-5.6 Sol`, `Extra High`, and `verified=yes`; a mismatch blocks submission instead of permitting a fallback.
-- Every regular run is bound to one exact project root and one absolute UTF-8 mission file. Never substitute another root or expose an entire drive.
-- Preview with the selected runner's dry-run mode before any real submission. Preserve exact Oracle slug/session identity during recovery; never resubmit a timed-out run as a replacement.
-- After a successful dry-run and explicit live authorization, execute the exact installed dispatcher/runtime command selected by the current skill. Do not invent a wrapper, duplicate a run, or use lifecycle behavior from an older installed version.
-- If DevSpace is unavailable or ChatGPT reports an app/account connection failure, classify the run as blocked and use only `chatgpt-workspace-setup` diagnosis or repair. Do not claim that implementation is running, do not silently retry a terminal blocked run, and do not fall back to CodexPro, agbrowse, ZIP attachments, Chrome automation, or another workspace.
-- Report implementation complete only after the exact run has terminal output and the required task outcome permits completion (`EXECUTED`, or an explicitly allowed compatibility outcome). Browser launch, model verification, relay registration, or transport exit alone is not implementation evidence.
-- Treat CodexPro and agbrowse as persisted-run recovery only, never as a fallback for new work.
-<!-- CHATGPT_ORACLE_ROUTING_END -->
+- Unqualified requests for `오케스트레이션`, `오케스트레이트`, `지휘`, workers, or subagents mean Codex native worker orchestration.
+- Do not infer an external web-GPT workflow from those terms. Such a workflow requires the user to request it explicitly by name.
+- DevSpace is independent workspace infrastructure and should be used only when the user explicitly places it in scope.
 
 --- project-doc ---
 
