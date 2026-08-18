@@ -4,13 +4,22 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 publish = false
-description = "Task-centric Rust control plane for long-running AI development agents"
+description = "Windows-native AI chat workstation with a direct Codex CLI runtime"
 repository = "https://github.com/coseung2/roche"
 
 [dependencies]
-async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
+arboard = { version = "3", default-features = false, features = ["image-data"] }
+base64 = "0.22"
+chrono = "0.4"
+getrandom = "0.3"
 eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+png = "0.18"
+rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
-thiserror = "2"
-uuid = { version = "1", features = ["serde", "v4"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_DataExchange", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_System_SystemInformation"] }
+
+[target.'cfg(windows)'.dependencies]
+tao = "0.35.3"
+wry = "0.55.1"
