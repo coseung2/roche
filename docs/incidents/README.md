@@ -6,11 +6,10 @@ Incident 문서는 장애를 비난이 아니라 **재현 가능한 사실, 영�
 
 다음 중 하나라도 해당하면 Incident 후보입니다.
 
-- GUI 재시작으로 살아 있어야 할 agent가 종료됨
-- Herdr session 복구 실패 또는 잘못된 session mapping
-- Task 상태가 실제 runtime과 불일치
-- 잘못된 Task가 Completed 처리됨
-- worktree 격리가 깨져 다른 Task의 변경을 덮어씀
+- 앱 종료 시 Codex app-server가 잘못 정리되어 좀비 프로세스가 남음
+- Codex app-server 연결 / initialize 핸드셰이크 실패
+- 채팅 UI 상태가 실제 runtime과 불일치 (streaming / turn state)
+- 모델 카탈로그 로드 실패 또는 잘못된 항목 표시
 - 자동화가 의도하지 않은 merge / destructive Git 작업을 수행함
 - event / artifact / test result 유실 또는 corruption
 - 대용량 history 때문에 UI가 실사용 불가능한 수준으로 정지
@@ -31,8 +30,8 @@ Incident 문서는 장애를 비난이 아니라 **재현 가능한 사실, 영�
 
 ### SEV-1 — High
 
-- 실행 중 agent를 복구할 수 없음
-- 여러 Task에 영향을 주는 runtime/state corruption
+- 실행 중 Codex app-server를 복구할 수 없음
+- 여러 채팅 세션에 영향을 주는 runtime/state corruption
 - 핵심 Milestone 흐름이 사실상 사용 불가
 
 ### SEV-2 — Medium
@@ -68,7 +67,7 @@ Detected
 - 문제 기능 비활성화
 - scheduler 일시 중단
 - 자동 merge 금지
-- 영향을 받는 worktree 보존
+- 영향받는 저장소 / log 상태 보존
 - 관련 log / event snapshot 보존
 
 ### 3. Diagnosing
@@ -76,9 +75,8 @@ Detected
 다음 축을 분리해서 확인합니다.
 
 - Rust App State
-- Orchestrator state
-- Herdr runtime state
-- Git / worktree state
+- Codex app-server state
+- catalog / config state
 - persistence / event state
 
 ### 4. Mitigated
@@ -108,7 +106,7 @@ Incident ID는 문서 제목에서 `INC-YYYYMMDD-NN` 형식을 사용합니다.
 예:
 
 ```text
-INC-20260818-01 — Herdr session recovery mismatch
+INC-20260818-01 — Codex app-server reconnect failure
 ```
 
 ## Blameless 원칙

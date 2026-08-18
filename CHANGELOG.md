@@ -9,34 +9,44 @@
 ### Added
 
 - Rust crate foundation
-- Project / Task / Session domain model
-- Herdr adapter contract
-- Deterministic Orchestrator state transition guard
-- Sidebar priority projection
-- App runtime snapshot cache
-- Repository README and development workflow
-- ADR management system
-- Incident management system
-- GitHub Issue / Pull Request templates
 - Phase 0 synthetic performance workload for 100,000 messages, 100,000 tool events, and 1,000 sessions
 - Framework-independent viewport virtualization core and streaming-tail invariant tests
 - 50 MiB terminal ingest simulation with a bounded 500-line resident ring buffer
 - Release-mode `perf_poc` runner and performance baseline documentation
-- egui/eframe native desktop shell with virtualized session, conversation, tool, and terminal views
-- Session search/status filters and local Task creation flow
+- egui/eframe native desktop shell with virtualized conversation and tool views
 - ADR-0002 documenting the Phase 0B desktop framework decision
+- Direct Codex CLI discovery and `codex app-server --stdio` background worker
+- Codex JSONL protocol client (initialize / thread / turn / steer / interrupt)
+- Live model catalog loading from `model_catalog_json` with documented fallbacks
+- Codex catalog selection wired to `turn/start.params.model` runtime override
+- Chat model/reasoning popover with Lucide chevron icons and connection badges
+- `[WEB] GPT-5.6 Sol` native mailbox transport and loopback JSON-RPC bridge
+- Rust Orchestrator task queue with explicit `needs_review` approval gate
+- Web GPT / Codex recursive session graph and `roche_web` control CLI
+- Windows WebView2 ChatGPT login profile, state probe, and native-request wake-up adapter
+- WebView2 `--webgpt-browser-host` helper-process isolation with JSONL stdio command/event transport
 
 ### Changed
 
-- None
+- Migrated from the Herdr runtime dependency to a direct Codex CLI runtime
+- Unified Web GPT and Codex behind the same native chat UI/model selector
 
 ### Fixed
 
-- None
+- Windows `0xc000041d / 0xc0000005` crash caused by running eframe and Tao/Wry WebView2 event loops in the same process
 
 ### Security
 
-- None
+- Web GPT bridge is loopback-only and protected by a random per-process capability token discovered through the ignored runtime descriptor
+- Missing or incorrect bridge capability is rejected before RPC dispatch
+
+### Removed
+
+- Herdr adapter / CLI wrapper transport
+- Herdr background polling runtime and session/terminal/Task(worktree) UI
+- `roche_ctl` Web GPT control bridge
+- Herdr-based Task / Session / Orchestrator domain scaffolding
+- Herdr-related documentation (quickstart, ADR-0001, status/README/AGENTS references)
 
 ## Release 작성 규칙
 

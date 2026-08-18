@@ -30,9 +30,9 @@ incident/<short-name>
 예:
 
 ```text
-feat/herdr-snapshot
+feat/direct-codex-chat
 perf/sidebar-virtualization
-fix/task-transition-guard
+fix/catalog-path-parse
 ```
 
 직접 `main`에서 장기 개발하지 않습니다. 다만 초기 repository bootstrap처럼 원격 협업이 시작되기 전의 baseline 구성은 예외로 둘 수 있습니다.
@@ -42,8 +42,8 @@ fix/task-transition-guard
 Conventional Commit 형태를 사용합니다.
 
 ```text
-feat: add herdr session snapshot client
-fix: reject direct running-to-completed transition
+feat: connect codex app-server chat runtime
+fix: reject catalog entries without a resolvable slug
 perf: virtualize sidebar rows
 docs: add incident response process
 chore: bootstrap repository management
@@ -57,9 +57,8 @@ chore: bootstrap repository management
 
 - UI framework 선택
 - persistence / migration 전략 변경
-- Herdr protocol contract 변경
-- Task state machine 의미 변경
-- worktree 정책 변경
+- Codex runtime / transport 선택 변경
+- chat 상태 모델 의미 변경
 - process lifetime / recovery 모델 변경
 - AI backend 또는 security boundary 변경
 
@@ -84,11 +83,10 @@ ADR 규칙은 [`docs/adr/README.md`](docs/adr/README.md)를 따릅니다.
 ## Rust 코드 원칙
 
 - UI와 runtime / orchestration 로직을 분리합니다.
-- 외부 runtime ID를 사용자-facing domain ID로 사용하지 않습니다.
-- Task 완료 여부는 Orchestrator가 결정합니다.
+- 외부 ID(thread / turn)를 사용자-facing 상태로 부풀리지 않습니다.
+- 채팅 전송 / 중단은 Codex runtime controller를 통해서만 수행합니다.
 - 큰 payload를 장기 resident memory에 고정하지 않습니다.
 - blocking I/O, Git, DB bulk query, socket I/O, 대형 parsing은 UI thread에서 실행하지 않습니다.
-- 상태 전이는 가능한 한 enum과 명시적 transition guard로 표현합니다.
 
 ## 테스트 전략
 
@@ -103,10 +101,10 @@ ADR 규칙은 [`docs/adr/README.md`](docs/adr/README.md)를 따릅니다.
 
 특히 다음 invariant는 regression test로 보호합니다.
 
-- Herdr `Done`은 Task `Completed`와 동일하지 않다.
-- Blocked / Needs Attention은 sidebar에서 일반 Working보다 우선한다.
-- GUI 재시작이 agent process lifetime을 소유하지 않는다.
-- 한 Task가 하나의 worktree를 소유하는 기본 정책을 깨지 않는다.
+- Codex `Ready`는 app-server initialize 응답 수신 후에만 발생한다.
+- 카탈로그 파싱은 object / string 항목을 모두 지원한다.
+- 연결되지 않은 모델 항목은 연결 상태로 표시하지 않는다.
+- UI thread는 Codex runtime I/O를 수행하지 않는다.
 
 ## Pull Request
 

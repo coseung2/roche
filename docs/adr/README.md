@@ -7,10 +7,9 @@ ADR은 장기적으로 유지되어야 하는 설계 결정을 코드와 별도�
 다음과 같이 이후 구현 선택을 제약하는 결정에 사용합니다.
 
 - UI framework 선택
-- Herdr protocol / transport 계약
+- Codex runtime / transport 선택
 - persistence / event-store 구조
-- Task / Session lifecycle 의미
-- worktree ownership 정책
+- chat / thread lifecycle 의미
 - process lifetime / recovery 정책
 - context selection / AI backend 경계
 - security boundary
@@ -37,7 +36,7 @@ NNNN-short-kebab-title.md
 예:
 
 ```text
-0001-task-centric-control-plane.md
+0001-direct-codex-chat-runtime.md
 0002-ui-framework-selection.md
 ```
 

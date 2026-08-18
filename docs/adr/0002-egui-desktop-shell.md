@@ -5,7 +5,7 @@
 
 ## Context
 
-Roche needs a Windows-native shell that can be exercised before Herdr integration is complete. The shell must render large session, conversation, tool, and terminal histories without creating widgets for the full history.
+Roche needs a Windows-native shell that can be exercised before the live Codex runtime is connected. The shell must render large conversation, tool, and terminal histories without creating widgets for the full history.
 
 The Phase 0A core already proves bounded materialization independently of a GUI framework. Phase 0B needs a real window that can consume the same workload and preserve that property.
 
@@ -17,7 +17,6 @@ The decisive capability for this phase is `ScrollArea::show_rows`, which compute
 
 - 100,000 conversation rows
 - 100,000 tool-event rows
-- 1,000 session rows
 - the resident terminal ring buffer
 
 The dependency uses the native `glow` renderer with default fonts and persistence support. This choice is deliberately scoped to the first usable desktop shell and does not prevent replacement if later IME, text-selection, Markdown, terminal, or profiling tests expose unacceptable limits.
@@ -28,7 +27,7 @@ The dependency uses the native `glow` renderer with default fonts and persistenc
 
 - A real Windows desktop app can be built immediately on top of the existing Rust domain/performance core.
 - Virtualized list behavior maps directly to a framework primitive instead of a custom scroll implementation.
-- The UI remains a projection over domain/runtime state; Herdr integration can replace synthetic data without rewriting the shell structure.
+- The UI remains a projection over runtime state; the live Codex runtime can replace synthetic data without rewriting the shell structure.
 
 ### Negative
 

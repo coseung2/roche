@@ -1,94 +1,67 @@
 # Roche AI Workstation
 
-Rust 기반의 장기 실행 AI 개발 워크스테이션입니다. 대화 자체를 상태 저장소로 쓰지 않고 **Project / Task / Session / Event**를 독립적인 제품 상태로 관리하며, Herdr를 Codex 런타임으로 사용하고 Rust 애플리케이션이 control plane 역할을 맡습니다.
+Rust/egui 기반 Windows 네이티브 AI 채팅 워크스테이션입니다. 외부 Herdr 런타임 없이 Roche가 Codex CLI `app-server`를 직접 소유하고, 동일한 채팅 UI에서 `Codex`와 `[WEB] GPT-5.6 Sol`을 모델 선택으로 전환하는 구조를 사용합니다.
 
 ## 현재 상태
 
-프로젝트는 **Phase 0B — Usable Desktop Shell** 단계입니다. Framework-independent 성능 코어 위에 egui/eframe 기반 Windows native shell을 올렸고, 다음으로 Herdr 실연동을 진행합니다.
+현재 단계는 **Unified Native Chat Integration**입니다.
 
-현재 구현된 코어:
+Codex 직접 채팅은 app-server initialize/turn/streaming 경로가 동작합니다. 일반 Web GPT 채팅은 native composer에서 Windows WebView2 ChatGPT 세션으로 직접 입력하고, 실제 assistant 응답을 회수해 같은 native transcript에 표시합니다. JSON-RPC mailbox/Task/Session bridge는 별도의 오케스트레이션 control-plane으로 유지합니다.
 
-- 강타입 `ProjectId`, `TaskId`, `SessionId`
-- Task / Session 상태 모델
-- Herdr adapter 계약
-- 결정론적 Orchestrator 상태 전이
-- Blocked / attention 우선 Sidebar projection
-- Herdr snapshot을 로컬 runtime cache에 반영하는 App state
-- 핵심 상태 전이 및 정렬 테스트
-- 100,000 messages / 100,000 tool events / 1,000 sessions synthetic workload
-- viewport + overscan 기반 virtual window
-- 50 MiB terminal history를 최근 500줄로 제한하는 ring buffer
-- release-mode Performance PoC runner와 baseline 기록
-- egui/eframe Windows native desktop shell
-- 1,000-session virtualized sidebar + status/search filter
-- 100,000-row virtualized Chat / Tools views
-- 최근 500줄 terminal view
-- 로컬 Task 생성 UI
+현재 구현된 주요 기능:
 
-아직 구현하지 않은 주요 영역:
+- Codex CLI 자동 발견 및 `codex app-server --stdio` 연결 (`LOCAL CODEX READY`)
+- Codex JSONL 프로토콜 (`initialize`, `thread/start`, `turn/start`, `turn/steer`, `turn/interrupt`)
+- streaming assistant delta / final response / tool activity / turn completion 반영
+- Codex 모델 카탈로그 로드 (`model_catalog_json` 및 fallback catalog/cache)
+- `[WEB] GPT-5.6 Sol` / `Codex` 단일 모델 선택 UX와 추론 강도 설정
+- 별도 `--webgpt-browser-host` helper process에서 WebView2 직접 Web GPT 전송/응답 회수 (`ChatSubmitted` / `ChatAnswered`)
+- navigation-safe `sessionStorage` request correlation 및 accessibility-text response fallback
+- 인증된 Web GPT loopback control bridge (`chat.*`, `session.*`, `task.*`, `project.snapshot`)
+- per-process random capability token / runtime descriptor / non-loopback refusal
+- Rust Orchestrator Task 상태 (`queued → preparing → running_codex → needs_review → completed`)
+- 명시적 review gate (`needs_review`에서만 `task.approve` 가능)
+- Web GPT/Codex worker session graph (`session.spawn`, `session.status`, `session.workers`, `session.events`)
+- `roche_web` local control CLI
+- Windows WebView2 기반 ChatGPT 로그인 profile, login-state probe, hidden wake-up adapter
+- Phase 0 성능 코어 (100,000 messages / tool events, 1,000 sessions synthetic)
 
-- 실제 Herdr Socket API client
-- Windows IME / text selection / Markdown rich rendering 검증
-- SQLite event store
-- worktree / git diff / verifier
-- ChatGPT / DevSpace bridge
-- Context Engine
+## 현재 E2E 상태
 
-상세 진행 상황은 [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md)를 기준으로 관리합니다.
+일반 Web GPT 채팅은 다음 경로로 실제 exact round trip을 통과했습니다.
+
+```text
+Roche native composer
+  -> JSONL stdio
+  -> roche-workstation.exe --webgpt-browser-host
+  -> hidden WebView2 ChatGPT composer
+  -> ChatGPT response
+  -> Rust response extraction
+  -> 같은 native chat transcript
+```
+
+`webgpt_native_e2e_smoke`에서 `ROCHE_NATIVE_WEBGPT_READY`가 정확히 회수됩니다. mailbox round trip도 별도로 통과하며, 이는 Task/Session 오케스트레이션 control-plane 검증에 사용합니다.
+
+## 아직 완료 판정 전인 핵심 영역
+
+### Codex failure UX
+
+Codex catalog에서 선택한 slug는 이제 실제 `turn/start.params.model` override로 전달됩니다. `gpt-5.6-sol` explicit override live smoke가 `TURN_completed`와 `ROCHE_DIRECT_CODEX_READY`로 통과했습니다.
+
+OCX/Codex가 제공하는 `kiro`, `opencode-go` 등 provider/model 구성은 Roche가 변경하지 않습니다. 개별 provider/model 요청이 upstream에서 실패할 경우 provider 설정을 덮어쓰는 대신 해당 요청의 오류를 명확하게 표시하고 사용자의 선택 상태를 유지하는 UX가 남아 있습니다.
+
+### Persistence
+
+workspace 목록은 저장되지만 chat/session/task runtime 상태는 메모리 resident입니다. 앱 재시작 시 대화/Task/session 복구는 아직 없습니다.
 
 ## 핵심 설계 원칙
 
-1. **Conversation != Project State** — 채팅 기록은 프로젝트 상태 저장소가 아닙니다.
-2. **Task is first-class** — 작업, 에이전트, diff, test, approval, artifact는 Task 아래에 묶습니다.
-3. **Herdr = runtime** — PTY, Codex process, session lifetime, runtime status는 Herdr가 담당합니다.
-4. **Rust = control plane** — GUI, orchestration, persistence, verification, context, UX는 Rust가 담당합니다.
-5. **GUI lifetime != Agent lifetime** — GUI가 종료되어도 실행 중인 Codex 작업은 유지되어야 합니다.
-6. **Done != Complete** — Herdr의 agent `Done`만으로 Task를 완료 처리하지 않고 검증과 리뷰를 거칩니다.
-7. **Visible data only render** — 대용량 conversation, event, terminal history는 virtualization / lazy load를 기본으로 합니다.
-
-## 목표 아키텍처
-
-```text
-User
-  |
-  v
-Rust AI Workstation
-  |-- Native UI
-  |-- App State / Event Bus
-  |-- Orchestrator
-  |-- Context Engine
-  |-- SQLite Event Store
-  |-- Git / Worktree / Verifier
-  |
-  v
-Herdr Adapter
-  |
-  v
-Herdr daemon
-  |-- Codex process / PTY
-  |-- Session / Pane
-  |-- Runtime events
-  |-- Worktree runtime mapping
-```
-
-## 개발 순서
-
-현재 우선순위는 다음 순서를 고정합니다.
-
-1. UI Performance PoC
-2. Sidebar / Session model
-3. Herdr Socket Client
-4. Herdr Session Snapshot
-5. Event Subscription
-6. Codex Launch / Prompt / Wait
-7. Task Model
-8. SQLite Event Store
-9. Worktree integration
-10. Diff / Test / Verification
-11. Orchestrator State Machine
-12. ChatGPT / DevSpace Bridge
-13. Context Engine
-14. Native API Mode
+1. **Codex CLI가 로컬 실행 런타임** — Roche가 `codex app-server` 프로세스 생명주기를 직접 관리합니다.
+2. **Web GPT와 Codex는 같은 chat UX** — 별도 화면이 아니라 모델 선택으로 구분합니다.
+3. **일반 Web GPT 채팅과 오케스트레이션 control-plane을 분리** — 일반 답변은 WebView2에서 직접 송수신하고, Task/Session 오케스트레이션만 Roche의 authenticated high-level control surface를 사용합니다.
+4. **Rust가 Task completion 권한을 보유** — Codex 성공 turn은 `needs_review`까지이며 자동 `completed`가 아닙니다.
+5. **Runtime I/O는 UI thread 밖** — Codex stdio, socket, Git/file I/O는 background 경로를 사용하고, Tao/Wry/WebView2는 eframe과 충돌하지 않도록 별도 helper process에 격리합니다.
+6. **Visible data only render** — 대용량 conversation/event/terminal 데이터는 virtualization과 bounded memory를 기본으로 합니다.
 
 ## 로컬 개발
 
@@ -96,59 +69,81 @@ Herdr daemon
 
 - Rust 1.95 이상
 - Cargo
-- Windows가 우선 target이며, Herdr 연동 단계부터 Herdr daemon이 필요합니다.
+- PATH에 `codex` CLI
+- Windows Web GPT 사용 시 WebView2 Runtime
+
+기본 품질 게이트:
 
 ```bash
-cargo fmt --check
-cargo test
+cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets
+cargo check --all-targets
 ```
 
-실사용 desktop shell은 다음 명령으로 실행합니다.
+실행:
 
 ```bash
 cargo run --release --bin roche-workstation
 ```
 
-이미 release build를 했다면 Windows에서 다음 파일을 직접 실행할 수 있습니다.
-
-```text
-target\\release\\roche-workstation.exe
-```
-
-현재 shell은 `LOCAL PERF MODE`로 시작하며 synthetic session/event 데이터를 사용합니다. Task 생성과 virtualized browsing은 실제 UI로 동작하고, Codex/Herdr launch는 다음 integration 단계에서 연결됩니다.
-
-Phase 0 성능 workload는 release mode에서 실행합니다.
+release build:
 
 ```bash
-cargo run --release --bin perf_poc
+cargo build --release --bin roche-workstation
 ```
 
-성능 측정 정책과 baseline은 [`docs/performance/README.md`](docs/performance/README.md)에서 관리합니다.
-
-## 저장소 운영
-
-- 개발 절차: [`CONTRIBUTING.md`](CONTRIBUTING.md)
-- 프로젝트 상태: [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md)
-- Architecture Decision Records: [`docs/adr/README.md`](docs/adr/README.md)
-- Incident 관리: [`docs/incidents/README.md`](docs/incidents/README.md)
-- Performance PoC: [`docs/performance/README.md`](docs/performance/README.md)
-- 보안 원칙: [`SECURITY.md`](SECURITY.md)
-- 변경 이력: [`CHANGELOG.md`](CHANGELOG.md)
-
-## 첫 Milestone 완료 정의
-
-Milestone 1은 다음 흐름이 실제로 동작할 때 완료입니다.
+Windows 실행 파일:
 
 ```text
-Rust app start
- -> Herdr connect
- -> running Codex sessions appear in sidebar
- -> select session and read recent terminal output
- -> launch a new Codex task
- -> Working / Blocked / Idle / Done update live
- -> close GUI while Codex keeps running
- -> reopen GUI and recover sessions
+target\release\roche-workstation.exe
 ```
 
-이 완료 기준은 [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md)의 체크리스트로 추적합니다.
+Web GPT local bridge CLI:
+
+```bash
+cargo build --bin roche_web
+```
+
+예시:
+
+```text
+roche_web health
+roche_web chat-wait --timeout 240
+roche_web chat-respond <request-id> --text "answer"
+roche_web session-list
+roche_web create --title "Task" --goal "Goal" --accept "Acceptance criterion" --effort high
+roche_web snapshot
+```
+
+상세 계약은 [`docs/WEBGPT_BRIDGE.md`](docs/WEBGPT_BRIDGE.md)를 참고합니다.
+
+## 현재 검증 상태
+
+2026-08-18 기준:
+
+- `codex-cli 0.147.0-alpha.1.2` initialize handshake 통과
+- Codex `gpt-5.6-sol` explicit `turn/start.params.model` live smoke 통과
+- Web GPT bridge health 통과
+- authenticated native mailbox round-trip smoke 통과
+- helper-process WebView2 direct Web GPT exact E2E smoke 통과
+- eframe + Tao/Wry same-process Windows callback crash (`0xc000041d / 0xc0000005`) 회귀 제거 및 release 앱 12초 생존 검증
+- bridge capability rejection unit test 통과
+- `cargo fmt --all -- --check` 통과
+- `cargo check --all-targets` 통과
+- `cargo test --all-targets` 통과
+- `cargo clippy --all-targets --all-features -- -D warnings` 통과
+- `target\release\roche-workstation.exe` release build 통과
+
+최신 상세 상태와 다음 작업 순서는 [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md)를 기준으로 관리합니다.
+
+## 저장소 문서
+
+- 프로젝트 상태: [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md)
+- Web GPT bridge: [`docs/WEBGPT_BRIDGE.md`](docs/WEBGPT_BRIDGE.md)
+- 개발 절차: [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- ADR: [`docs/adr/README.md`](docs/adr/README.md)
+- Incident: [`docs/incidents/README.md`](docs/incidents/README.md)
+- Performance: [`docs/performance/README.md`](docs/performance/README.md)
+- Security: [`SECURITY.md`](SECURITY.md)
+- Changelog: [`CHANGELOG.md`](CHANGELOG.md)

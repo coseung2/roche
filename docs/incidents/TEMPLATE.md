@@ -15,8 +15,8 @@ Resolved: `YYYY-MM-DD HH:MM TZ | N/A`
 ## Impact
 
 - 영향받은 기능:
-- 영향받은 Task / Session:
-- 데이터 / Git 영향:
+- 영향받은 Chat thread / Codex session:
+- 데이터 / 저장소 영향:
 - 사용자 영향:
 
 ## Detection
@@ -39,7 +39,7 @@ Resolved: `YYYY-MM-DD HH:MM TZ | N/A`
 
 - 관련 log / event ID:
 - 관련 commit:
-- 관련 Task:
+- 관련 thread / turn:
 - 관련 test:
 
 민감한 token, credential, private payload는 첨부하지 않습니다.
@@ -66,9 +66,9 @@ Resolved: `YYYY-MM-DD HH:MM TZ | N/A`
 
 ## Recovery Verification
 
-- [ ] runtime 상태와 App State가 일치한다.
-- [ ] 관련 Task / Session이 올바르게 복구된다.
-- [ ] Git / worktree 상태가 안전하다.
+- [ ] Codex app-server 연결 상태와 UI 표시가 일치한다.
+- [ ] 관련 thread / 스트리밍 상태가 올바르게 복구된다.
+- [ ] 저장소 / 변경 대상 상태가 안전하다.
 - [ ] regression test가 통과한다.
 - [ ] restart / retry 경로를 확인했다.
 

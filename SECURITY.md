@@ -1,6 +1,6 @@
 # Security Policy
 
-Roche AI Workstation은 로컬 process, terminal, source repository, worktree, AI agent를 다루므로 일반 데스크톱 앱보다 강한 local trust boundary가 필요합니다.
+Roche AI Workstation은 로컬 process, source repository, Codex app-server 프로세스, AI agent를 다루므로 일반 데스크톱 앱보다 강한 local trust boundary가 필요합니다.
 
 ## 현재 단계
 
@@ -12,7 +12,7 @@ Roche AI Workstation은 로컬 process, terminal, source repository, worktree, A
 
 - secret / token / credential을 source 또는 fixture에 commit하지 않습니다.
 - 대형 raw tool payload와 terminal log는 민감 정보가 포함될 수 있는 데이터로 취급합니다.
-- Herdr / DevSpace / future MCP 연동에서 사용자 의도 없이 repository 밖의 경로를 노출하지 않습니다.
+- DevSpace / future MCP 연동에서 사용자 의도 없이 repository 밖의 경로를 노출하지 않습니다.
 - agent가 수행하는 destructive Git 작업, merge, delete, credential 접근은 명시적인 product policy와 approval boundary 없이 자동화하지 않습니다.
 - UI 표시용 domain ID와 external runtime ID를 분리합니다.
 - incident evidence를 남길 때 secret을 redact합니다.
